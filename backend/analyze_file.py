@@ -200,9 +200,11 @@ def print_report(result: dict) -> None:
                   f"{entry['region_count']} region")
             if entry["known_false_positive"]:
                 print(f"             {entry['known_false_positive']}")
-        for conn in memory.get("external_connections", [])[:10]:
-            print(f"    koneksi eksternal: {conn.get('Owner')} (PID {conn.get('PID')}) -> "
-                  f"{conn.get('ForeignAddr')}:{conn.get('ForeignPort')} {conn.get('State')}")
+        for conn in memory.get("notable_connections", [])[:12]:
+            print(f"    [{conn['confidence']:<7}] koneksi: {conn['process']} "
+                  f"(PID {conn['pid']}) {conn['local']} -> {conn['foreign']} {conn['state'] or ''}")
+            for reason in conn["reasons"]:
+                print(f"             {reason}")
 
     disk = result.get("disk") or {}
     if disk.get("available"):

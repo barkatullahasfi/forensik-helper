@@ -726,15 +726,33 @@ function memorySection(r) {
     <span class="v">${i.region_count} region RWX${i.known_false_positive
       ? ` <span style="color:var(--dim)">— ${esc(i.known_false_positive)}</span>` : ""}</span></div>`).join("");
 
-  const conns = (m.external_connections || []).slice(0, 12).map(c => `<div class="kv-row">
-    <span class="k">${esc(c.Owner)} · PID ${c.PID}</span>
-    <span class="v">${esc(c.ForeignAddr)}:${esc(c.ForeignPort)} ${esc(c.State || "")}</span></div>`).join("");
+  // Koneksi janggal ditampilkan sebagai finding card, bukan baris kecil di
+  // bawah: reverse shell adalah temuan paling penting di RAM dump dan tidak
+  // boleh tenggelam. Disaring menurut ALASAN, bukan menurut "IP eksternal" --
+  // pada lab dan serangan lateral, penyerang justru sesubnet dengan korban.
+  (m.notable_connections || []).forEach(c => rows.push(`<div class="finding">
+    <div class="finding-head">${sev(c.confidence)}
+      <span class="finding-cat">${esc(c.process)} &rarr; ${esc(c.foreign)}</span>
+      <span class="finding-time">PID ${c.pid}${c.state ? " · " + esc(c.state) : ""}</span></div>
+    <div class="finding-body">
+      <div class="req-block">${esc(c.local)} &rarr; ${esc(c.foreign)}</div>
+      ${c.reasons.map(r => `<div class="fp-note"><span class="fp-dot"
+        style="background:var(--${c.confidence === "HIGH" ? "red" : "amber"})"></span>${esc(r)}</div>`).join("")}
+      ${filter(c.evidence_query)}</div></div>`));
+
+  const info = m.system_info || {};
+  const sysRows = kv([
+    ["Kernel base", info.kernel_base ? `<code>${esc(info.kernel_base)}</code>` : null],
+    ["DTB", info.dtb], ["Build", info.build],
+    ["Arsitektur", info.is_64bit ? "64-bit" : "32-bit"],
+    ["Prosesor", info.processors],
+  ]);
 
   return section("RAM dump", `${m.process_count} proses · ${m.connections.length} koneksi`,
+    (sysRows ? `<div class="panel" style="margin-bottom:13px">
+      <div class="summary-label">Informasi sistem</div>${sysRows}</div>` : "") +
     rows.join("") +
-    (inject ? `<div class="panel" style="margin-bottom:13px">
-      <div class="summary-label">malfind — region executable + writable</div>${inject}</div>` : "") +
-    (conns ? `<div class="panel"><div class="summary-label">Koneksi ke IP eksternal</div>${conns}</div>` : ""));
+    (inject ? `<div class="panel"><div class="summary-label">malfind — region executable + writable</div>${inject}</div>` : ""));
 }
 
 function diskSection(r) {

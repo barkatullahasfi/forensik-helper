@@ -625,6 +625,40 @@ def test_startup_folder_is_flagged_not_only_temp():
     assert flagged[0]["confidence"] == "MEDIUM"
 
 
+def test_reverse_shell_to_private_ip_not_filtered_out():
+    """
+    Regresi: menyaring koneksi hanya ke "IP eksternal" menyembunyikan temuan
+    terpenting. Pada lab dan serangan lateral, penyerang berada di alamat
+    PRIVAT -- reverse shell w3wp.exe -> 10.0.2.4:4443 tersaring keluar justru
+    karena ia tetangga sesubnet.
+    """
+    from backend.services.memory_analyzer import notable_connections
+    conns = [
+        {"Owner": "w3wp.exe", "PID": 4332, "LocalAddr": "10.0.2.15", "LocalPort": 49688,
+         "ForeignAddr": "10.0.2.4", "ForeignPort": 4443, "State": "CLOSED"},
+        {"Owner": "System", "PID": 4, "LocalAddr": "0.0.0.0", "LocalPort": 445,
+         "ForeignAddr": "0.0.0.0", "ForeignPort": 0, "State": "LISTENING"},
+        {"Owner": "chrome.exe", "PID": 900, "LocalAddr": "10.0.2.15", "LocalPort": 50001,
+         "ForeignAddr": "10.0.2.9", "ForeignPort": 443, "State": "ESTABLISHED"},
+    ]
+    result = notable_connections(conns)
+    processes = [c["process"] for c in result]
+    assert "w3wp.exe" in processes, "reverse shell ke IP privat WAJIB muncul"
+    assert result[0]["confidence"] == "HIGH"
+    assert any("pembalikan peran" in r for r in result[0]["reasons"])
+    assert "System" not in processes, "socket LISTENING bukan koneksi keluar"
+    assert "chrome.exe" not in processes, "browser ke port 443 lokal itu wajar"
+
+
+def test_suspicious_port_flagged_even_for_ordinary_process():
+    from backend.services.memory_analyzer import notable_connections
+    result = notable_connections([
+        {"Owner": "notepad.exe", "PID": 123, "LocalAddr": "10.0.0.5", "LocalPort": 5000,
+         "ForeignAddr": "10.0.0.9", "ForeignPort": 4444, "State": "ESTABLISHED"}])
+    assert len(result) == 1 and result[0]["confidence"] == "HIGH"
+    assert any("4444" in r for r in result[0]["reasons"])
+
+
 def test_defender_in_programdata_downgraded_not_hidden():
     """Windows Defender memang tinggal di ProgramData -- ditandai LOW, tetap dilaporkan."""
     from backend.services.memory_analyzer import flag_suspicious_cmdlines

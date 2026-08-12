@@ -318,6 +318,13 @@ def full_memory_triage(dump_path, threat_checker=None,
                        f"vol -f <dump> windows.cmdline --pid {item['pid']}",
                        f"{item['process_name']} -> {item['commandline_binary']} "
                        f"(PID {item['pid']})", note=item["note"])
+    for conn in notable_connections(connections):
+        if conn["confidence"] == "HIGH":
+            evidence.track(
+                "suspicious_outbound_connection", conn["evidence_query"],
+                f"{conn['process']} (PID {conn['pid']}) -> {conn['foreign']}",
+                note="; ".join(conn["reasons"]) + f". State: {conn['state']}")
+
     for entry in injected_by_process.values():
         evidence.track("memory_code_injection",
                        f"vol -f <dump> windows.malfind --pid {entry['pid']}",
@@ -343,9 +350,64 @@ def full_memory_triage(dump_path, threat_checker=None,
         "persistence": persistence,
         "orphan_processes": orphans,
         "malicious_connections": malicious_connections,
+        "notable_connections": notable_connections(connections),
         "external_connections": [c for c in connections
                                  if _is_external(str(c.get("ForeignAddr") or ""))],
     }
+
+
+# Proses server: menerima koneksi adalah tugasnya, MEMULAI koneksi keluar bukan.
+SERVER_PROCESSES = ("w3wp.exe", "httpd.exe", "nginx.exe", "sqlservr.exe", "tomcat.exe",
+                    "inetinfo.exe", "java.exe", "php-cgi.exe", "node.exe")
+
+# Port yang jarang dipakai lalu lintas keluar yang sah.
+SUSPICIOUS_PORTS = {1337, 4444, 4445, 4443, 5555, 6666, 6667, 7777, 8443, 8888,
+                    9001, 9002, 31337, 50050}
+
+
+def notable_connections(connections: list[dict]) -> list[dict]:
+    """
+    Koneksi yang layak dilihat, beserta ALASANNYA.
+
+    Menyaring hanya ke "IP eksternal" adalah kesalahan yang mahal: pada lab,
+    jaringan internal, atau serangan lateral, penyerang berada di alamat PRIVAT.
+    Reverse shell ke 10.0.2.4 tersaring keluar justru karena ia tetangga sesubnet
+    -- temuan terpenting jadi tak terlihat sama sekali.
+
+    Jadi yang dipakai bukan "eksternal atau bukan", melainkan apakah koneksinya
+    janggal: siapa yang memulainya, ke port berapa, dan ke mana.
+    """
+    notable = []
+    for conn in connections:
+        owner = str(conn.get("Owner") or "").lower()
+        foreign = str(conn.get("ForeignAddr") or "")
+        port = conn.get("ForeignPort")
+        state = str(conn.get("State") or "")
+        if not foreign or foreign in ("0.0.0.0", "::", "*") or state == "LISTENING":
+            continue
+
+        reasons = []
+        if owner in SERVER_PROCESSES:
+            reasons.append(f"{conn.get('Owner')} adalah proses SERVER — memulai "
+                           "koneksi keluar adalah pembalikan peran, pola reverse shell")
+        if port in SUSPICIOUS_PORTS:
+            reasons.append(f"port {port} jarang dipakai lalu lintas keluar yang sah")
+        if _is_external(foreign):
+            reasons.append("tujuan di luar jaringan lokal")
+        if not reasons:
+            continue
+        notable.append({
+            "process": conn.get("Owner"), "pid": conn.get("PID"),
+            "local": f"{conn.get('LocalAddr')}:{conn.get('LocalPort')}",
+            "foreign": f"{foreign}:{port}", "foreign_ip": foreign, "port": port,
+            "state": state or None,
+            "confidence": "HIGH" if owner in SERVER_PROCESSES or port in SUSPICIOUS_PORTS
+                          else "MEDIUM",
+            "reasons": reasons,
+            "evidence_query": f"ip.addr=={foreign} && tcp.port=={port}",
+        })
+    order = {"HIGH": 0, "MEDIUM": 1}
+    return sorted(notable, key=lambda c: (order.get(c["confidence"], 9), c["process"] or ""))
 
 
 def _is_external(ip: str) -> bool:

@@ -226,8 +226,8 @@ python -m backend.analyze_file sample1.exe sample2.exe
 
 ### Evidence pack (korelasi multi-sumber)
 
-Analisis tiap berkas dulu, lalu di GUI Ctrl+klik entri yang ingin dikorelasikan,
-atau lewat API:
+Analisis tiap berkas dulu, lalu di GUI Ctrl+klik entri yang ingin dikorelasikan
+dan tekan "Korelasikan". Lewat API:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/evidence-pack -H "Content-Type: application/json" -d "[\"id_pcap\",\"id_memdump\"]"
