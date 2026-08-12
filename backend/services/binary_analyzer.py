@@ -82,6 +82,46 @@ def _plausible_domain(domain: str) -> bool:
                        "ini", "log", "txt", "cpp", "h", "c", "res", "drv", "ocx"}
 
 
+# Packer dikenali dari NAMA SECTION dan penanda di dalam berkas.
+#
+# "entropy tinggi" hanya bilang bahwa datanya terkompresi -- ia tidak menyebutkan
+# PACKER APA. Nama packernya adalah informasi yang bisa ditindaklanjuti: ia
+# menentukan cara membongkarnya dan sering jadi ciri keluarga malware tertentu.
+PACKER_SIGNATURES = [
+    ({"UPX0", "UPX1", "UPX2", "UPX!"}, b"UPX!", "UPX",
+     "Dapat dibongkar dengan `upx -d`"),
+    ({".aspack", ".adata"}, b"aPLib", "ASPack", None),
+    ({"FSG!"}, b"FSG!", "FSG", None),
+    ({".petite"}, b"petite", "Petite", None),
+    ({".themida", ".vmp0", ".vmp1"}, b"Themida", "Themida/VMProtect",
+     "Pelindung komersial -- sangat sulit dibongkar secara statis"),
+    ({".enigma1", ".enigma2"}, b"Enigma", "Enigma Protector", None),
+    ({".MPRESS1", ".MPRESS2"}, b"MPRESS", "MPRESS", None),
+    ({".nsp0", ".nsp1"}, b"NsPack", "NsPack", None),
+    ({".boom"}, b"", "The Boomerang", None),
+]
+
+
+def identify_packer(file_path, section_names: list[str]) -> dict:
+    """Kenali packer dari nama section, dengan penanda dalam berkas sebagai penguat."""
+    sections = {name.strip("\x00") for name in section_names}
+    head = Path(file_path).read_bytes()[:4096]
+    for expected, marker, name, hint in PACKER_SIGNATURES:
+        if sections & expected:
+            return {"packer": name, "matched_sections": sorted(sections & expected),
+                    "marker_found": bool(marker and marker in head), "hint": hint,
+                    "confidence": "HIGH"}
+    for expected, marker, name, hint in PACKER_SIGNATURES:
+        if marker and marker in head:
+            return {"packer": name, "matched_sections": [], "marker_found": True,
+                    "hint": hint, "confidence": "MEDIUM"}
+    return {"packer": None, "matched_sections": [], "marker_found": False,
+            "hint": "Entropy tinggi tanpa tanda packer yang dikenali bisa berarti "
+                    "packer khusus, berkas terenkripsi, atau sekadar sumber daya "
+                    "terkompresi (gambar/video) di dalam binary",
+            "confidence": "LOW"}
+
+
 def parse_pe_header(file_path) -> dict:
     try:
         import pefile
@@ -125,6 +165,7 @@ def parse_pe_header(file_path) -> dict:
         "is_packed_heuristic": packed,
         "packed_reason": (f"{len(high_entropy)} section entropy > 7.0" if high_entropy
                           else f"hanya {len(sections)} section" if packed else None),
+        "packer": identify_packer(file_path, [s["name"] for s in sections]),
         "capabilities": detect_capabilities(imports),
     }
 
@@ -155,6 +196,20 @@ def analyze_binary(file_path, threat_checker=None,
     for url in iocs["urls"][:10]:
         evidence.track("binary_hardcoded_url", f"strings {path.name} | grep http", url,
                        note="URL tertanam di dalam binary (analisis statis)")
+    packer = (pe.get("packer") or {})
+    if packer.get("packer"):
+        evidence.track("binary_packer", f"pefile {path.name} sections",
+                       packer["packer"],
+                       note=f"Dikenali dari section {packer['matched_sections']}"
+                            + (", penanda dalam berkas juga cocok" if packer["marker_found"] else "")
+                            + (f". {packer['hint']}" if packer["hint"] else "")
+                            + ". Strings dan import table dari berkas ter-pack tidak "
+                              "mencerminkan isi sebenarnya -- bongkar dulu sebelum "
+                              "menyimpulkan tidak ada IOC di dalamnya.")
+    elif pe.get("is_packed_heuristic"):
+        evidence.track("binary_packed_unknown", f"pefile {path.name} sections",
+                       pe.get("packed_reason") or "terkompresi",
+                       note=packer.get("hint") or "")
     if pe.get("compile_timestamp"):
         evidence.track("binary_compile_time", f"pefile {path.name} FILE_HEADER.TimeDateStamp",
                        pe["compile_timestamp"],

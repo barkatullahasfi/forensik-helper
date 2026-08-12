@@ -66,6 +66,33 @@ def run_plugin(dump_path, plugin: str, extra_args: list[str] | None = None) -> l
         return [{"error": "output volatility bukan JSON", "raw": out[:500]}]
 
 
+def get_system_info(dump_path) -> dict:
+    """
+    windows.info — profil OS, alamat basis kernel, DTB, jumlah prosesor.
+
+    Alamat basis kernel adalah titik acuan untuk seluruh analisis memory dan
+    sering diminta secara eksplisit; ia keluar dari plugin ini, bukan dari
+    daftar proses.
+    """
+    rows = run_plugin(dump_path, "windows.info")
+    info = {}
+    for row in rows:
+        key, value = row.get("Variable"), row.get("Value")
+        if key:
+            info[key] = value
+    return {
+        "raw": info,
+        "kernel_base": info.get("Kernel Base"),
+        "dtb": info.get("DTB"),
+        "os_version": info.get("NtMajorVersion") and
+                      f"{info.get('NtMajorVersion')}.{info.get('NtMinorVersion')}",
+        "build": info.get("Major/Minor"),
+        "is_64bit": str(info.get("Is64Bit", "")).lower() == "true",
+        "processors": info.get("KeNumberProcessors"),
+        "system_time": info.get("SystemTime"),
+    }
+
+
 def get_process_list(dump_path) -> list[dict]:
     return run_plugin(dump_path, "windows.pslist.PsList")
 
@@ -234,6 +261,14 @@ def full_memory_triage(dump_path, threat_checker=None,
         return {"available": False,
                 "error": "Volatility 3 belum terpasang (pip install volatility3)"}
 
+    system = get_system_info(dump_path)
+    if system.get("kernel_base"):
+        evidence.track("memory_kernel_base", "vol -f <dump> windows.info",
+                       system["kernel_base"],
+                       note=f"Build {system.get('build')}, "
+                            f"{'64-bit' if system.get('is_64bit') else '32-bit'}, "
+                            f"{system.get('processors')} prosesor. DTB {system.get('dtb')}")
+
     processes = get_process_list(dump_path)
     connections = get_network_connections(dump_path)
     cmdlines = get_command_lines(dump_path)
@@ -295,6 +330,7 @@ def full_memory_triage(dump_path, threat_checker=None,
 
     return {
         "available": True,
+        "system_info": system,
         "process_count": len(processes), "processes": processes,
         "connections": connections,
         "command_lines": cmdlines,

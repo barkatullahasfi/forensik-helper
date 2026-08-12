@@ -38,7 +38,10 @@ def collect_sessions(pcap_path, internal_ip: str) -> list[dict]:
         "frame.number", "frame.time_epoch", "ip.src", "ip.dst",
         "tcp.dstport", "tcp.stream"])
 
-    payload = _payload_by_stream(pcap_path, internal_ip)
+    # Transaksi HTTP lengkap (header + body + response) per stream. Dipakai
+    # bersama detektor OWASP, jadi tidak ada pembacaan pcap tambahan.
+    from .http_analyzer import by_stream, summarize
+    http_by_stream = by_stream(pcap_path)
     dns_map = build_dns_map(pcap_path)
 
     sessions = []
@@ -48,8 +51,16 @@ def collect_sessions(pcap_path, internal_ip: str) -> list[dict]:
         dst_ip = row["ip.dst"].split(",")[0]
         outbound = src_ip == internal_ip
         peer = dst_ip if outbound else src_ip
-        summary = payload.get(stream)
+        items = http_by_stream.get(_int(stream)) or []
+        summary = summarize(items) if items else None
+        statuses = sorted({t["response"]["status_code"] for t in items
+                           if t["response"] and t["response"]["status_code"]})
         sessions.append({
+            # Transaksi lengkap ditempelkan supaya log sesi bisa dibuka sampai
+            # header dan body -- daftar request tanpa response tidak menjawab
+            # pertanyaan yang sebenarnya diajukan: apakah permintaan itu berhasil?
+            "transactions": items,
+            "response_codes": statuses,
             "frame_number": _int(row["frame.number"]),
             "timestamp": _float(row["frame.time_epoch"]),
             "time_utc": to_utc(_float(row["frame.time_epoch"])),
@@ -65,22 +76,6 @@ def collect_sessions(pcap_path, internal_ip: str) -> list[dict]:
             "summary": summary or "SYN only, idle, closed",
         })
     return sessions
-
-
-def _payload_by_stream(pcap_path, internal_ip: str) -> dict[str, str]:
-    """Ringkasan HTTP per tcp.stream, dipakai menandai sesi mana yang berisi payload."""
-    rows = run_tshark_fields(
-        pcap_path, f"http.request && (ip.src=={internal_ip} || ip.dst=={internal_ip})",
-        ["tcp.stream", "http.request.method", "http.host", "http.request.uri"])
-    summaries: dict[str, list[str]] = {}
-    for row in rows:
-        stream = row["tcp.stream"].split(",")[0]
-        method = row["http.request.method"].split(",")[0] or "HTTP"
-        host = row["http.host"].split(",")[0]
-        uri = row["http.request.uri"].split(",")[0]
-        summaries.setdefault(stream, []).append(f"{method} {host}{uri}".strip())
-    return {stream: " + ".join(items[:4]) + (f" (+{len(items) - 4} lagi)" if len(items) > 4 else "")
-            for stream, items in summaries.items()}
 
 
 def detect_beaconing(sessions: list[dict], evidence: EvidenceLog | None = None,

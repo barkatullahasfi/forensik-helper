@@ -245,6 +245,29 @@ tr:last-child td { border-bottom:none; }
             padding:12px 14px; background:var(--panel-2); border-radius:6px;
             border-left:2px solid var(--border); margin-top:12px; line-height:1.6; }
 .empty { color:var(--dim); font-size:13px; padding:40px 0; text-align:center; }
+
+/* Detail transaksi HTTP yang bisa dibuka. <details> dipakai apa adanya:
+   native, jalan tanpa JS, dan bisa diakses lewat keyboard. */
+details.txn > summary { cursor:pointer; list-style:none; color:var(--text);
+                        padding:2px 0; }
+details.txn > summary::-webkit-details-marker { display:none; }
+details.txn > summary::before { content:"▸"; color:var(--dim); margin-right:6px;
+                                display:inline-block; transition:transform .15s; }
+details.txn[open] > summary::before { transform:rotate(90deg); }
+details.txn > summary:hover { color:var(--amber); }
+.txn-body { margin:8px 0 4px; padding-left:14px;
+            border-left:2px solid var(--border); }
+.txn-block { margin-bottom:10px; }
+.txn-label { font-family:var(--mono); font-size:9px; text-transform:uppercase;
+             letter-spacing:.7px; color:var(--dim); margin-bottom:4px; }
+.txn-pre { background:rgba(0,0,0,.28); border:1px solid var(--border);
+           border-radius:5px; padding:9px 11px; font-family:var(--mono);
+           font-size:10.5px; line-height:1.65; white-space:pre-wrap;
+           word-break:break-all; max-height:280px; overflow:auto; margin:0; }
+.txn-pre.req { border-left:2px solid var(--blue); }
+.txn-pre.resp { border-left:2px solid var(--green); }
+.txn-pre .k { color:var(--dim); }
+.txn-empty { color:var(--dim); font-style:italic; font-size:10.5px; }
 </style>
 
 <div class="topbar">
@@ -761,27 +784,84 @@ function profileAndMitre(r) {
   </div>`;
 }
 
+// Header dan body ditampilkan APA ADANYA. Bukti yang diparafrase kehilangan
+// nilainya -- yang perlu bisa dikutip di laporan adalah teks aslinya.
+function headerBlock(label, lines, body, bodyLength, extra, cls) {
+  const parts = [];
+  if (extra) parts.push(`<div style="color:var(--bright)">${esc(extra)}</div>`);
+  if (lines && lines.length) {
+    parts.push(lines.map(line => {
+      const i = line.indexOf(":");
+      return i > 0 ? `<span class="k">${esc(line.slice(0, i + 1))}</span>${esc(line.slice(i + 1))}`
+                   : esc(line);
+    }).join("\n"));
+  }
+  let bodyPart = "";
+  if (body) {
+    bodyPart = `<div class="txn-label" style="margin-top:8px">body · ${bodyLength} byte</div>
+                <pre class="txn-pre">${esc(body)}</pre>`;
+  } else if (bodyLength === 0) {
+    bodyPart = `<div class="txn-empty" style="margin-top:6px">(tanpa body)</div>`;
+  }
+  return `<div class="txn-block"><div class="txn-label">${esc(label)}</div>
+    ${parts.length ? `<pre class="txn-pre ${cls}">${parts.join("\n")}</pre>` : ""}
+    ${bodyPart}</div>`;
+}
+
+function transactionDetail(session) {
+  const items = session.transactions || [];
+  if (!items.length) return esc(session.summary);
+  const inner = items.map(t => {
+    const q = t.request, p = t.response;
+    const reqLine = `${q.method} ${q.uri} HTTP/1.1`;
+    const respLine = p
+      ? `HTTP ${p.status_code ?? "?"} ${p.phrase || ""}`.trim()
+      : null;
+    return `<div class="txn-body">
+      ${headerBlock("request  · frame #" + t.frame_number, q.headers, q.body,
+                    q.body_length, reqLine, "req")}
+      ${p ? headerBlock(`response · frame #${p.frame_number}`
+                        + (p.content_type ? " · " + p.content_type : ""),
+                        p.headers, p.body, p.body_length, respLine, "resp")
+          : `<div class="txn-block"><div class="txn-label">response</div>
+             <div class="txn-empty">Tidak ada response tercatat — koneksi kemungkinan
+             di-drop atau di-reset sebelum server menjawab.</div></div>`}
+    </div>`;
+  }).join("");
+  return `<details class="txn"><summary>${esc(session.summary)}</summary>${inner}</details>`;
+}
+
 function sessionTable(r) {
   const sessions = r.all_sessions || [];
   if (!sessions.length) return "";
   const withPayload = sessions.filter(s => s.has_payload);
   const shown = (withPayload.length ? withPayload : sessions).slice(0, 60);
-  const rows = shown.map(s => `<tr>
+  const rows = shown.map(s => {
+    const codes = (s.response_codes || []);
+    const badge = codes.length
+      ? codes.map(c => `<span class="resp-status ${statusClass(c)}">${c}</span>`).join("")
+      : `<span class="muted">—</span>`;
+    return `<tr>
     <td class="mono">${esc(s.time_utc || "")}</td>
     <td class="mono">${esc(s.direction === "inbound" ? "↓" : "↑")} ${esc(s.dst_ip)}</td>
     <td class="mono">${esc((s.resolved_names || [])[0] || "—")}</td>
     <td class="mono">${s.dst_port ?? "—"}</td>
-    <td style="color:var(--${s.has_payload ? "text" : "dim"})">${esc(s.summary)}</td>
-    <td class="mono">#${s.frame_number}</td></tr>`).join("");
+    <td class="mono">${badge}</td>
+    <td style="color:var(--${s.has_payload ? "text" : "dim"})">${transactionDetail(s)}</td>
+    <td class="mono">#${s.frame_number}</td></tr>`;
+  }).join("");
   const sum = r.session_summary || {};
   return section("Log sesi koneksi", `${sum.total_sessions} sesi`,
     `<div class="panel"><div class="tbl-wrap"><table>
-      <thead><tr><th>waktu</th><th>peer</th><th>domain</th><th>port</th><th>ringkasan</th><th>frame</th></tr></thead>
+      <thead><tr><th>waktu</th><th>peer</th><th>domain</th><th>port</th><th>hasil</th>
+        <th>transaksi — klik untuk membuka header &amp; body</th><th>frame</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
       <div class="footnote">${sum.sessions_with_payload} sesi berisi payload,
       ${sum.sessions_idle} hanya handshake tanpa muatan. Sesi idle sengaja TIDAK dibuang —
       supaya jumlah total bisa di-cross-check saat menyusun laporan.
-      ${shown.length < sessions.length ? `Ditampilkan ${shown.length} dari ${sessions.length}.` : ""}</div>
+      ${shown.length < sessions.length ? `Ditampilkan ${shown.length} dari ${sessions.length}.` : ""}
+      Body dipotong pada 4000 karakter; untuk isi utuh pakai
+      <code>tshark -r &lt;pcap&gt; -q -z follow,tcp,ascii,&lt;stream&gt;</code>.</div>
     </div>`);
 }
 

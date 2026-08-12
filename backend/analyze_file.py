@@ -153,7 +153,17 @@ def print_report(result: dict) -> None:
         pe = binary["pe"]
         print("\n  PE HEADER")
         print(f"    compile   : {pe['compile_timestamp']}")
+        packer = pe.get("packer") or {}
         print(f"    packed    : {pe['is_packed_heuristic']} ({pe.get('packed_reason') or '-'})")
+        if packer.get("packer"):
+            print(f"    packer    : {packer['packer']} [{packer['confidence']}] "
+                  f"section {packer['matched_sections']}"
+                  + ("  + penanda cocok" if packer["marker_found"] else ""))
+            if packer.get("hint"):
+                print(f"                {packer['hint']}")
+            print("                Strings & import table di bawah ini berasal dari "
+                  "berkas TER-PACK —")
+            print("                bongkar dulu sebelum menyimpulkan tidak ada IOC.")
         for capability, hits in (pe.get("capabilities") or {}).items():
             print(f"    kapabilitas: {capability} <- {', '.join(hits[:5])}")
         for url in binary["iocs"]["urls"][:10]:
@@ -162,8 +172,18 @@ def print_report(result: dict) -> None:
     memory = result.get("memory") or {}
     if memory.get("available"):
         print("\n  RAM DUMP")
+        info = memory.get("system_info") or {}
+        if info.get("kernel_base"):
+            print(f"    kernel base : {info['kernel_base']}   DTB {info.get('dtb')}")
+            print(f"    build       : {info.get('build')}  "
+                  f"{'64-bit' if info.get('is_64bit') else '32-bit'}, "
+                  f"{info.get('processors')} prosesor")
         print(f"    {memory['process_count']} proses, {len(memory['connections'])} koneksi "
               f"({len(memory.get('external_connections', []))} ke IP eksternal)")
+        for item in memory.get("persistence", []):
+            print(f"    [HIGH]   persistence: {item['binary'] or item['process']} "
+                  f"(PID {item['pid']}) via {item['mechanism']}")
+            print(f"             {item['path']}")
         for item in memory.get("process_hollowing", []):
             print(f"    [HIGH]   hollowing: {item['process_name']} -> "
                   f"{item['commandline_binary']} (PID {item['pid']})")

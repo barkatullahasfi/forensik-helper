@@ -75,44 +75,26 @@ def extract_http_pairs(pcap_path) -> list[dict]:
     """
     Pasangan request/response, dikorelasikan lewat tcp.stream.
 
-    Response WAJIB ikut: tanpa itu modul ini cuma mendaftar payload, tidak bisa
-    menyimpulkan apa pun.
+    Diambil dari `http_analyzer` yang juga menyuplai log sesi -- satu pembacaan
+    pcap untuk dua keperluan. Response WAJIB ikut: tanpa itu modul ini cuma
+    mendaftar payload dan tidak bisa menyimpulkan apa pun.
     """
-    requests = run_tshark_fields(pcap_path, "http.request", [
-        "frame.number", "frame.time_epoch", "ip.src", "ip.dst", "tcp.stream",
-        "http.request.method", "http.host", "http.request.uri", "http.file_data"])
-    responses = run_tshark_fields(pcap_path, "http.response", [
-        "tcp.stream", "http.response.code", "http.server", "http.content_type",
-        "http.file_data"])
-
-    # Beberapa response per stream (keep-alive); dipasangkan berurutan.
-    by_stream: dict[str, list[dict]] = {}
-    for row in responses:
-        by_stream.setdefault(row["tcp.stream"].split(",")[0], []).append(row)
-
+    from .http_analyzer import transactions
     pairs = []
-    counters: dict[str, int] = {}
-    for req in requests:
-        stream = req["tcp.stream"].split(",")[0]
-        index = counters.get(stream, 0)
-        counters[stream] = index + 1
-        candidates = by_stream.get(stream, [])
-        resp = candidates[index] if index < len(candidates) else None
+    for item in transactions(pcap_path):
+        req, resp = item["request"], item["response"]
         pairs.append({
-            "frame_number": _int(req["frame.number"]),
-            "timestamp": _float(req["frame.time_epoch"]),
-            "src_ip": req["ip.src"].split(",")[0],
-            "dst_ip": req["ip.dst"].split(",")[0],
-            "tcp_stream": _int(stream),
-            "method": req["http.request.method"].split(",")[0],
-            "host": req["http.host"].split(",")[0],
-            "uri": req["http.request.uri"].split(",")[0],
-            "body": req["http.file_data"],
+            "frame_number": item["frame_number"],
+            "timestamp": item["timestamp"],
+            "src_ip": item["src_ip"],
+            "dst_ip": item["dst_ip"],
+            "tcp_stream": item["tcp_stream"],
+            "method": req["method"], "host": req["host"], "uri": req["uri"],
+            "body": req["body"],
             "response": {
-                "status_code": _int(resp["http.response.code"].split(",")[0]),
-                "server": resp["http.server"].split(",")[0],
-                "content_type": resp["http.content_type"].split(",")[0],
-                "body": resp["http.file_data"],
+                "status_code": resp["status_code"], "server": resp["server"],
+                "content_type": resp["content_type"], "body": resp["body"],
+                "headers": resp["headers"],
             } if resp else None,
         })
     return pairs

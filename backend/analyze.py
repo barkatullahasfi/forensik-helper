@@ -20,7 +20,7 @@ from .services import (attack_timeline, beacon_detector, dga_detector,
                        investigation_summary, ja3_fingerprint, kerberos_analyzer,
                        location_analyzer, mitre_mapper, narrative_generator,
                        osint_helper, owasp_detector, pcap_parser, protocol_anomaly,
-                       threat_feed, volume_analyzer)
+                       smb_analyzer, threat_feed, tool_fingerprint, volume_analyzer)
 from .services.timeline_builder import EvidenceLog, build_full_timeline
 
 
@@ -131,6 +131,12 @@ def analyze_pcap(pcap_path, target_ip: str | None = None, progress=print) -> dic
         ja3, ja3_hits = [], []
         skipped.append("JA3/TLS (tidak ada lalu lintas TLS)")
 
+    result_smb = (smb_analyzer.analyze(pcap_path, evidence)
+                  if has("smb", "smb2") else {})
+    if not has("smb", "smb2"):
+        skipped.append("SMB (tidak ada lalu lintas SMB di capture)")
+    tools_used = tool_fingerprint.analyze(pcap_path, evidence) if has("http") else []
+
     progress("[8/9] Deteksi serangan web + carving file...")
     owasp = owasp_detector.detect_owasp_patterns(pcap_path, evidence) if has("http") else []
     if not has("http"):
@@ -164,6 +170,8 @@ def analyze_pcap(pcap_path, target_ip: str | None = None, progress=print) -> dic
     result["participant_profile"] = osint_helper.build_participant_profile(identity, result)
     result["host_ranking"] = host_ranking
     result["inventory"] = inventory
+    result["smb"] = result_smb
+    result["tools_used"] = tools_used
     result["exposed_services"] = protocol_anomaly.map_exposed_services(
         sessions, target_ip, evidence)
     result["port_scans"] = protocol_anomaly.detect_port_scan(sessions, target_ip,
@@ -320,6 +328,16 @@ def print_report(result: dict) -> None:
              f"  [{d['role']}] {d['vendor'] or 'vendor tidak dikenal'}"
              + ("  VIRTUAL" if d["is_virtual"] else "")
              for d in inv.get("devices", [])[:8]] if inv else []),
+        ("ALAT PENYERANG (dari User-Agent)", [
+            f"{t['tool'] or 'tidak dikenal'} ({t['category']}) -- {t['request_count']} request "
+            f"dari {', '.join(t['sources'])}\n      {t['user_agent'][:100]}"
+            for t in result.get("tools_used", []) if t["is_attack_tool"]]),
+        ("SMB", [
+            f"share diakses: {', '.join((result.get('smb') or {}).get('shares_accessed', []))}"
+        ] + [f"berkas web-executable: {f['basename']} "
+             f"({f['access_count']}x, frame {f['first_frame']})"
+             for f in (result.get("smb") or {}).get("web_executables", [])]
+            if (result.get("smb") or {}).get("shares_accessed") else []),
         ("PORT SCAN", [
             f"{s['source_ip']} memindai {s['port_count']} port dalam {s['duration_sec']}s "
             f"sejak {s['window_start_utc']} ({s['single_touch_ports']} port disentuh sekali)"

@@ -14,16 +14,21 @@ from . import tools
 from .tools import run
 
 # tshark memakai '/t' sebagai literal tab di opsi -E separator.
-_FIELD_OPTS = ["-E", "separator=/t", "-E", "occurrence=a", "-E", "aggregator=,"]
 
 
 def run_tshark_fields(pcap_path, display_filter: str, fields: list[str],
-                      timeout: int | None = None) -> list[dict]:
+                      timeout: int | None = None, aggregator: str = ",") -> list[dict]:
     """
     Jalankan tshark dengan display filter dan field tertentu.
     Return satu dict per paket; paket yang semua field-nya kosong dibuang.
+
+    `aggregator` menentukan pemisah untuk field yang muncul berkali-kali dalam
+    satu paket (mis. tiap baris header HTTP). Default koma cocok untuk field
+    sederhana, tapi untuk header HTTP koma lazim muncul DI DALAM nilainya --
+    pemanggil yang mengambil header sebaiknya memilih pemisah lain.
     """
-    cmd = [tools.resolve("tshark"), "-r", str(pcap_path), "-T", "fields", *_FIELD_OPTS]
+    opts = ["-E", "separator=/t", "-E", "occurrence=a", "-E", f"aggregator={aggregator}"]
+    cmd = [tools.resolve("tshark"), "-r", str(pcap_path), "-T", "fields", *opts]
     if display_filter:
         cmd += ["-Y", display_filter]
     for f in fields:

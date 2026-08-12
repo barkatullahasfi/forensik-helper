@@ -464,6 +464,120 @@ def test_repeated_ports_are_not_a_scan():
     assert detect_port_scan(sessions, "10.0.2.15") == []
 
 
+# ---------- SMB & sidik jari perkakas ----------
+
+def test_header_lines_stripped_of_literal_crlf():
+    r"""
+    `-T fields` meng-escape CRLF jadi TEKS literal '\r\n', bukan karakter
+    kontrol. Membiarkannya membuat tiap baris header di laporan berakhiran
+    sampah yang terlihat seperti kesalahan penyalinan.
+    """
+    from backend.services.http_analyzer import _split_headers
+    raw = r"Host: 10.0.2.15\r\n|Connection: Keep-Alive\r\n|Accept: */*\r\n"
+    assert _split_headers(raw) == ["Host: 10.0.2.15", "Connection: Keep-Alive",
+                                   "Accept: */*"]
+    assert _split_headers("") == []
+    assert _split_headers(r"\r\n") == []
+
+
+def test_header_separator_is_not_comma():
+    """
+    Koma lazim muncul DI DALAM nilai header (Accept, Cache-Control), jadi
+    memakainya sebagai pemisah akan memotong satu header jadi beberapa baris.
+    """
+    from backend.services.http_analyzer import HEADER_SEPARATOR, _split_headers
+    assert HEADER_SEPARATOR != ","
+    raw = r"Accept: text/html,application/xhtml+xml\r\n|Host: x\r\n"
+    assert _split_headers(raw) == ["Accept: text/html,application/xhtml+xml", "Host: x"]
+
+
+def test_body_clipped_with_marker():
+    """Body megabyte membengkakkan hasil tanpa menambah nilai analisis."""
+    from backend.services.http_analyzer import MAX_BODY_CHARS, _clip
+    assert _clip("x" * 100) == "x" * 100
+    clipped = _clip("y" * (MAX_BODY_CHARS + 500))
+    assert len(clipped) == MAX_BODY_CHARS + 1 and clipped.endswith("…")
+
+
+def test_session_summary_includes_response_code():
+    """Daftar request tanpa response tidak menjawab: apakah permintaan berhasil?"""
+    from backend.services.http_analyzer import summarize
+    items = [{"request": {"method": "GET", "uri": "/robots.txt", "host": "10.0.2.15"},
+              "response": {"status_code": 404}},
+             {"request": {"method": "POST", "uri": "/upload", "host": "10.0.2.15"},
+              "response": None}]
+    text = summarize(items)
+    assert "GET 10.0.2.15/robots.txt -> 404" in text
+    assert "-> (tanpa response)" in text
+
+
+def test_smb_unc_backslashes_unescaped():
+    r"""
+    tshark menggandakan backslash pada field UNC: nilai mentah
+    `\\\\10.0.2.15\\IPC$` sebenarnya berarti `\\10.0.2.15\IPC$`. Menyalinnya apa
+    adanya ke laporan menghasilkan path yang tidak bisa dipakai siapa pun.
+    """
+    from backend.services.smb_analyzer import _unescape
+    assert _unescape(r"\\\\10.0.2.15\\IPC$") == r"\\10.0.2.15\IPC$"
+    assert _unescape(r"\\\\SERVER\\Documents") == r"\\SERVER\Documents"
+
+
+def test_web_executable_extensions_flagged():
+    """Berkas yang bisa dieksekusi web server, ditaruh lewat SMB = jalur RCE."""
+    from backend.services.smb_analyzer import WEB_EXECUTABLE
+    for name in ("shell.aspx", "cmd.asp", "backdoor.php", "x.jsp", "run.exe"):
+        assert name.endswith(WEB_EXECUTABLE), name
+    for name in ("information.txt", "web.config", "report.pdf", "logo.png"):
+        assert not name.endswith(WEB_EXECUTABLE), f"{name} bukan executable web"
+
+
+def test_admin_shares_distinguished():
+    """IPC$ diakses itu wajar; share biasa adalah tempat berkas bisa ditaruh."""
+    from backend.services.smb_analyzer import ADMIN_SHARES
+    assert "ipc$" in ADMIN_SHARES and "c$" in ADMIN_SHARES
+    assert "documents" not in ADMIN_SHARES and "wwwroot" not in ADMIN_SHARES
+
+
+def test_user_agent_identifies_attack_tools():
+    from backend.services.tool_fingerprint import classify
+    nmap = classify("Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/)")
+    assert nmap["tool"] == "Nmap" and nmap["is_attack_tool"]
+    assert classify("sqlmap/1.8#stable")["tool"] == "sqlmap"
+    assert classify("Nikto/2.5.0")["tool"] == "Nikto"
+    # Komponen Windows bukan alat serangan -- jangan dilaporkan sebagai penyerang.
+    windows = classify("Microsoft-CryptoAPI/10.0")
+    assert not windows["is_attack_tool"]
+    browser = classify("Mozilla/5.0 (Windows NT 10.0) Chrome/120.0")
+    assert browser["tool"] is None and not browser["is_attack_tool"]
+
+
+# ---------- Identifikasi packer ----------
+
+def test_upx_identified_by_section_names():
+    """
+    'entropy tinggi' hanya bilang datanya terkompresi, bukan PACKER APA.
+    Nama packer menentukan cara membongkarnya.
+    """
+    from backend.services.binary_analyzer import identify_packer
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "packed.exe"
+        path.write_bytes(b"MZ" + b"\x00" * 100 + b"UPX!" + b"\x00" * 100)
+        result = identify_packer(path, ["UPX0", "UPX1", ".rsrc"])
+    assert result["packer"] == "UPX"
+    assert result["confidence"] == "HIGH" and result["marker_found"]
+    assert "upx -d" in result["hint"]
+
+
+def test_unknown_packer_says_so_instead_of_guessing():
+    from backend.services.binary_analyzer import identify_packer
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "normal.exe"
+        path.write_bytes(b"MZ" + b"\x00" * 200)
+        result = identify_packer(path, [".text", ".data", ".rsrc"])
+    assert result["packer"] is None and result["confidence"] == "LOW"
+    assert "packer khusus" in result["hint"]   # arahkan, jangan diam
+
+
 # ---------- Memory (parser command line Volatility) ----------
 
 STARTUP_PATH = (r'"C:\Users\admin\AppData\Roaming\Microsoft\Windows\Start Menu'
