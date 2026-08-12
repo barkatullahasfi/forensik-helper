@@ -1,0 +1,19 @@
+# Inti -- dibutuhkan semua modul
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+
+# Analisis berkas
+puremagic          # tipe berkas dari konten. BUKAN python-magic: itu butuh
+                   # libmagic DLL yang tidak ada di Windows
+ppdeep             # fuzzy hash. BUKAN ssdeep: itu butuh libfuzzy-dev +
+                   # kompilasi C, praktis tidak bisa dipasang di Windows
+pefile             # parsing header PE
+
+# Opsional -- modul terkait dilewati dengan rapi kalau tidak ada
+volatility3        # RAM dump. Entrypoint yang terpasang bernama `vol`, bukan `vol3`
+geoip2             # GeoIP; masih perlu GeoLite2-City.mmdb dari akun MaxMind gratis
+binwalk            # deteksi berkas ter-embed
+librosa            # spectrogram audio
+matplotlib         # render spectrogram

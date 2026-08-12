@@ -1,0 +1,848 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Network Forensics Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* Font dari sistem, BUKAN Google Fonts: tools ini harus tetap utuh saat mesin
+   analisis offline. JetBrains Mono/Inter tetap dipakai kalau memang terpasang. */
+:root {
+  --bg:#0a0e14; --panel:#10151d; --panel-2:#151b25; --border:#232b38;
+  --text:#d8dee9; --dim:#6b7688; --bright:#f1f4f9;
+  --amber:#e8a33d; --red:#e05252; --green:#4caf7d; --blue:#5b9bd5; --purple:#9b7ede;
+  --mono:'JetBrains Mono',ui-monospace,'Cascadia Code',Consolas,monospace;
+  --sans:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--sans);
+       line-height:1.5; -webkit-font-smoothing:antialiased; }
+
+.topbar { background:var(--panel); border-bottom:1px solid var(--border);
+          padding:12px 22px; display:flex; align-items:center; gap:12px; }
+.logo-mark { width:28px; height:28px; border-radius:6px; flex-shrink:0;
+             background:linear-gradient(135deg,var(--amber),var(--red));
+             display:flex; align-items:center; justify-content:center;
+             font-family:var(--mono); font-weight:700; font-size:13px; color:#0a0e14; }
+.topbar-title { font-family:var(--mono); font-size:12.5px; color:var(--dim);
+                letter-spacing:.4px; }
+.topbar-title strong { color:var(--bright); font-weight:600; }
+.status-pill { margin-left:auto; font-family:var(--mono); font-size:11px;
+               padding:4px 10px; border-radius:20px; display:flex; gap:6px;
+               align-items:center; background:rgba(76,175,125,.12); color:var(--green);
+               border:1px solid rgba(76,175,125,.3); }
+.status-pill.warn { background:rgba(232,163,61,.12); color:var(--amber);
+                    border-color:rgba(232,163,61,.3); }
+.status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+.shell { display:grid; grid-template-columns:280px 1fr; align-items:start; }
+@media (max-width:940px) { .shell { grid-template-columns:1fr; } }
+aside { border-right:1px solid var(--border); padding:20px 18px;
+        position:sticky; top:0; max-height:100vh; overflow-y:auto; }
+main { padding:28px 26px 80px; max-width:1240px; min-width:0; }
+
+.panel { background:var(--panel); border:1px solid var(--border);
+         border-radius:8px; padding:18px; }
+.section { margin-bottom:30px; }
+.section-head { display:flex; align-items:center; gap:10px; margin-bottom:13px; }
+.section-head h2 { font-size:13.5px; font-weight:700; color:var(--bright);
+                   text-transform:uppercase; letter-spacing:.6px; }
+.section-head .count { font-family:var(--mono); font-size:11px; color:var(--dim);
+                       background:var(--panel-2); padding:2px 8px; border-radius:10px; }
+
+/* sidebar */
+aside h3 { font-family:var(--mono); font-size:10px; color:var(--dim);
+           text-transform:uppercase; letter-spacing:.9px; margin:0 0 10px; }
+#drop { border:1.5px dashed var(--border); border-radius:8px; padding:22px 10px;
+        text-align:center; color:var(--dim); cursor:pointer; font-size:12.5px; }
+#drop.over { border-color:var(--amber); color:var(--amber); }
+#drop span { font-family:var(--mono); font-size:10.5px; display:block; margin-top:5px; }
+input[type=text] { width:100%; padding:8px 10px; border-radius:6px; margin-top:8px;
+                   border:1px solid var(--border); background:var(--bg);
+                   color:var(--text); font-family:var(--mono); font-size:12px; }
+button { border:0; border-radius:6px; padding:8px 14px; font-weight:600;
+         cursor:pointer; font-size:12.5px; font-family:var(--sans);
+         background:var(--amber); color:#0a0e14; }
+button:disabled { opacity:.4; cursor:default; }
+button.ghost { background:transparent; color:var(--dim); border:1px solid var(--border); }
+button.ghost:hover:not(:disabled) { color:var(--text); border-color:var(--dim); }
+button.danger { background:transparent; color:var(--red);
+                border:1px solid rgba(224,82,82,.35); }
+button.danger:hover:not(:disabled) { background:rgba(224,82,82,.12); }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+#bar { height:5px; background:var(--border); border-radius:3px; overflow:hidden;
+       margin:12px 0 6px; display:none; }
+#bar > i { display:block; height:100%; width:0; background:var(--amber);
+           transition:width .4s ease; }
+/* Tahap carving jauh lebih lama dari yang lain sehingga bar tampak diam --
+   garis bergerak ini menandakan proses masih hidup, bukan hang. */
+#bar.busy > i { background:linear-gradient(90deg,var(--amber) 0 60%,transparent 60%);
+                background-size:26px 100%; animation:slide 1s linear infinite; }
+@keyframes slide { to { background-position:26px 0; } }
+
+ul.hist { list-style:none; }
+ul.hist li { display:flex; align-items:center; gap:8px; padding:7px 6px;
+             border-radius:5px; font-size:12.5px; cursor:pointer; }
+ul.hist li:hover { background:var(--panel-2); }
+ul.hist li.sel { background:rgba(232,163,61,.1); color:var(--amber); }
+ul.hist li .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+ul.hist li .del { color:var(--dim); font-family:var(--mono); padding:0 4px;
+                  opacity:0; border-radius:3px; }
+ul.hist li:hover .del { opacity:1; }
+ul.hist li .del:hover { color:var(--red); background:rgba(224,82,82,.12); }
+.dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+
+/* header + alert */
+.header-row { display:flex; justify-content:space-between; align-items:flex-end;
+              margin-bottom:24px; flex-wrap:wrap; gap:14px; }
+.header-row h1 { font-size:21px; font-weight:700; color:var(--bright);
+                 letter-spacing:-.3px; }
+.subtitle { font-family:var(--mono); font-size:11.5px; color:var(--dim); margin-top:4px; }
+.kind-tag { font-family:var(--mono); font-size:10.5px; padding:5px 12px; border-radius:4px;
+            text-transform:uppercase; letter-spacing:.8px; font-weight:600;
+            background:rgba(224,82,82,.1); color:var(--red);
+            border:1px solid rgba(224,82,82,.35); }
+.kind-tag.calm { background:rgba(91,155,213,.1); color:var(--blue);
+                 border-color:rgba(91,155,213,.35); }
+
+.alert-banner { display:flex; align-items:center; gap:14px; border-radius:6px;
+                padding:13px 17px; margin-bottom:26px;
+                background:linear-gradient(90deg,rgba(224,82,82,.12),rgba(224,82,82,.03));
+                border:1px solid rgba(224,82,82,.3); border-left:4px solid var(--red); }
+.alert-banner.calm { background:linear-gradient(90deg,rgba(91,155,213,.1),transparent);
+                     border-color:rgba(91,155,213,.3); border-left-color:var(--blue); }
+.alert-icon { width:30px; height:30px; border-radius:50%; flex-shrink:0;
+              display:flex; align-items:center; justify-content:center;
+              background:rgba(224,82,82,.15); color:var(--red);
+              font-family:var(--mono); font-weight:700; font-size:15px; }
+.alert-banner.calm .alert-icon { background:rgba(91,155,213,.15); color:var(--blue); }
+.alert-text { font-size:12.5px; }
+.alert-text strong { color:var(--bright); }
+.alert-count { margin-left:auto; font-family:var(--mono); font-size:23px;
+               font-weight:700; color:var(--red); text-align:right; line-height:1; }
+.alert-banner.calm .alert-count { color:var(--blue); }
+.alert-count span { display:block; font-size:9px; color:var(--dim); font-weight:400;
+                    margin-top:3px; text-transform:uppercase; letter-spacing:.5px; }
+
+.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+                gap:1px; background:var(--border); border:1px solid var(--border);
+                border-radius:8px; overflow:hidden; margin-bottom:30px; }
+.summary-cell { background:var(--panel); padding:14px 16px; }
+.summary-label { font-family:var(--mono); font-size:9.5px; color:var(--dim);
+                 text-transform:uppercase; letter-spacing:.8px; margin-bottom:7px; }
+.summary-value { font-family:var(--mono); font-size:13px; color:var(--bright);
+                 font-weight:600; word-break:break-all; }
+.summary-value.danger { color:var(--red); }
+
+.cat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+            gap:13px; }
+.cat-card { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+            padding:15px; border-top:3px solid var(--border); }
+.cat-card.hit { border-top-color:var(--red); }
+.cat-card .oc-id { font-family:var(--mono); font-size:9.5px; color:var(--dim);
+                   text-transform:uppercase; letter-spacing:.5px; }
+.cat-card .oc-name { font-size:12.5px; font-weight:600; color:var(--bright);
+                     margin:4px 0 9px; }
+.cat-card .oc-count { font-family:var(--mono); font-size:26px; font-weight:700;
+                      color:var(--dim); }
+.cat-card.hit .oc-count { color:var(--red); }
+.cat-card .oc-label { font-family:var(--mono); font-size:9px; color:var(--dim);
+                      text-transform:uppercase; margin-top:2px; }
+
+/* finding cards */
+.finding { background:var(--panel); border:1px solid var(--border);
+           border-radius:8px; margin-bottom:13px; overflow:hidden; }
+.finding-head { display:flex; align-items:center; gap:10px; padding:12px 16px;
+                background:var(--panel-2); border-bottom:1px solid var(--border);
+                flex-wrap:wrap; }
+.sev-badge, .outcome-tag { font-family:var(--mono); font-size:9.5px; font-weight:700;
+                           padding:3px 9px; border-radius:4px; text-transform:uppercase;
+                           letter-spacing:.4px; white-space:nowrap; }
+.sev-HIGH { background:rgba(224,82,82,.18); color:var(--red);
+            border:1px solid rgba(224,82,82,.4); }
+.sev-MEDIUM { background:rgba(232,163,61,.18); color:var(--amber);
+              border:1px solid rgba(232,163,61,.4); }
+.sev-LOW { background:rgba(107,118,136,.18); color:var(--dim);
+           border:1px solid rgba(107,118,136,.4); }
+.finding-cat { font-size:12.5px; font-weight:700; color:var(--bright); }
+.finding-time { margin-left:auto; font-family:var(--mono); font-size:10.5px;
+                color:var(--dim); }
+.finding-body { padding:15px 16px; }
+.finding-meta { display:flex; gap:18px; margin-bottom:11px; flex-wrap:wrap; }
+.finding-meta span { font-family:var(--mono); font-size:10.5px; color:var(--dim); }
+.finding-meta strong { color:var(--text); font-weight:600; }
+
+.req-block, .resp-block { background:var(--panel-2); border:1px solid var(--border);
+                          border-radius:6px; padding:11px 13px; font-family:var(--mono);
+                          font-size:11px; line-height:1.7; word-break:break-all;
+                          margin-bottom:9px; }
+.resp-block { border-left:3px solid var(--border); }
+.resp-block.blocked { border-left-color:var(--green); }
+.resp-block.error { border-left-color:var(--amber); }
+.resp-block.leaked, .resp-block.reflected { border-left-color:var(--red); }
+.req-method { color:var(--blue); font-weight:700; }
+.req-host { color:var(--bright); font-weight:600; }
+.hl { background:rgba(224,82,82,.22); color:#ff8a8a; padding:1px 3px;
+      border-radius:2px; font-weight:600; }
+.resp-status { font-weight:700; padding:1px 8px; border-radius:3px; font-size:10px;
+               margin-right:8px; }
+.s2xx { background:rgba(76,175,125,.15); color:var(--green); }
+.s3xx, .s4xx { background:rgba(91,155,213,.15); color:var(--blue); }
+.s5xx { background:rgba(232,163,61,.15); color:var(--amber); }
+.resp-body { color:var(--dim); margin-top:5px; }
+.leak { color:var(--red); font-weight:600; }
+.out-blocked { background:rgba(76,175,125,.15); color:var(--green);
+               border:1px solid rgba(76,175,125,.35); }
+.out-error { background:rgba(232,163,61,.15); color:var(--amber);
+             border:1px solid rgba(232,163,61,.35); }
+.out-leaked { background:rgba(224,82,82,.18); color:var(--red);
+              border:1px solid rgba(224,82,82,.4); }
+.out-reflected { background:rgba(155,126,222,.15); color:var(--purple);
+                 border:1px solid rgba(155,126,222,.35); }
+.out-no_effect, .out-no_response { background:rgba(107,118,136,.15); color:var(--dim);
+                                   border:1px solid rgba(107,118,136,.35); }
+
+.pattern-match { font-family:var(--mono); font-size:10px; color:var(--dim);
+                 background:rgba(0,0,0,.2); padding:7px 11px; border-radius:5px;
+                 border-left:2px solid var(--red); word-break:break-all; }
+.pattern-match .label { color:var(--red); font-weight:700; text-transform:uppercase;
+                        font-size:8.5px; letter-spacing:.5px; margin-right:8px; }
+.fp-note { margin-top:9px; font-size:11px; color:var(--dim); font-style:italic;
+           display:flex; align-items:flex-start; gap:7px; }
+.fp-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; margin-top:5px; }
+
+/* filter siap-salin: alasan utama halaman ini ada */
+.filter { display:block; background:rgba(0,0,0,.25); border:1px solid var(--border);
+          border-radius:5px; padding:7px 11px; margin-top:8px; cursor:pointer;
+          font-family:var(--mono); font-size:11px; color:var(--amber);
+          word-break:break-all; }
+.filter:hover { border-color:var(--amber); }
+.filter.copied { border-color:var(--green); color:var(--green); }
+
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+@media (max-width:900px) { .two-col { grid-template-columns:1fr; } }
+.kv-row { display:flex; justify-content:space-between; gap:14px; padding:7px 0;
+          border-bottom:1px solid rgba(35,43,56,.5); font-size:12px; }
+.kv-row:last-child { border-bottom:none; }
+.kv-row .k { color:var(--dim); font-family:var(--mono); font-size:10.5px;
+             white-space:nowrap; }
+.kv-row .v { color:var(--text); font-weight:500; text-align:right;
+             word-break:break-all; }
+
+.tbl-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; }
+th { font-family:var(--mono); font-size:9.5px; text-transform:uppercase;
+     letter-spacing:.6px; color:var(--dim); text-align:left;
+     padding:0 10px 9px; border-bottom:1px solid var(--border); white-space:nowrap; }
+td { padding:8px 10px; font-size:11.5px; border-bottom:1px solid rgba(35,43,56,.5);
+     vertical-align:top; }
+td.mono { font-family:var(--mono); font-size:11px; }
+tr:last-child td { border-bottom:none; }
+
+.copy-block { background:var(--panel-2); border:1px solid var(--border);
+              border-radius:6px; padding:15px 17px; font-size:12.5px;
+              line-height:1.75; white-space:pre-wrap; }
+.footnote { font-family:var(--mono); font-size:10.5px; color:var(--dim);
+            padding:12px 14px; background:var(--panel-2); border-radius:6px;
+            border-left:2px solid var(--border); margin-top:12px; line-height:1.6; }
+.empty { color:var(--dim); font-size:13px; padding:40px 0; text-align:center; }
+</style>
+
+<div class="topbar">
+  <div class="logo-mark">NF</div>
+  <div class="topbar-title" id="tb-title">Network Forensics Dashboard</div>
+  <div class="status-pill" id="tb-status"><span class="status-dot"></span> siap</div>
+</div>
+
+<div class="shell">
+  <aside>
+    <h3>Analisis baru</h3>
+    <div id="drop">Jatuhkan berkas di sini<span>pcap · gambar · exe · disk · RAM</span></div>
+    <input type="file" id="file" hidden>
+    <input type="text" id="ip" placeholder="target IP (opsional, khusus pcap)">
+    <div class="row" style="margin-top:9px">
+      <button id="go" disabled>Analisis</button>
+      <span id="picked" class="subtitle" style="margin:0"></span>
+    </div>
+    <div id="bar"><i></i></div>
+    <p id="status" class="subtitle" style="margin:4px 0 0"></p>
+
+    <h3 style="margin-top:24px">Riwayat</h3>
+    <ul class="hist" id="history"></ul>
+    <div class="row" style="margin-top:12px">
+      <button class="ghost" id="pack" disabled>Korelasikan</button>
+      <button class="danger" id="wipe">Hapus semua</button>
+    </div>
+    <p class="subtitle" style="margin-top:8px; line-height:1.5">
+      Klik membuka · Ctrl+klik memilih untuk korelasi · ✕ menghapus satu</p>
+  </aside>
+
+  <main id="result">
+    <div class="empty">Pilih berkas untuk memulai, atau buka salah satu riwayat.</div>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g,
+  c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const api = (p, o) => fetch(p, o).then(r => r.ok ? r.json()
+  : r.json().then(e => Promise.reject(e)).catch(() => Promise.reject({ detail: r.status })));
+let picked = null, selected = new Set();
+
+/* ---------------- upload ---------------- */
+const drop = $("#drop");
+drop.onclick = () => $("#file").click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over");
+                     choose(e.dataTransfer.files[0]); };
+$("#file").onchange = e => choose(e.target.files[0]);
+
+function choose(f) {
+  if (!f) return;
+  picked = f;
+  $("#picked").textContent = f.name + " · " + (f.size / 1048576).toFixed(1) + " MB";
+  $("#go").disabled = false;
+}
+
+$("#go").onclick = async () => {
+  if (!picked) return;
+  $("#go").disabled = true;
+  const body = new FormData();
+  body.append("file", picked);
+  if ($("#ip").value.trim()) body.append("target_ip", $("#ip").value.trim());
+  showBar(2, true);
+  setPill("mengunggah…", true);
+  try {
+    const { analysis_id } = await api("/api/upload", { method: "POST", body });
+    poll(analysis_id);
+  } catch (e) {
+    $("#bar").style.display = "none";
+    $("#status").innerHTML = '<span style="color:var(--red)">gagal: ' + esc(e.detail) + "</span>";
+    $("#go").disabled = false;
+  }
+};
+
+async function poll(id) {
+  const started = Date.now();
+  const tick = async () => {
+    // Endpoint /status, bukan hasil penuh: menarik seluruh JSON tiap dua detik
+    // hanya untuk membaca satu kata berarti mengirim megabyte berulang kali.
+    const r = await api("/api/analysis/" + id + "/status");
+    const secs = Math.round((Date.now() - started) / 1000);
+    if (r.status === "done") {
+      showBar(100, false);
+      $("#status").textContent = "selesai dalam " + secs + " detik";
+      $("#go").disabled = false;
+      render(await api("/api/analysis/" + id));
+      loadHistory();
+      setTimeout(() => $("#bar").style.display = "none", 1200);
+    } else if (r.status === "error") {
+      $("#bar").style.display = "none";
+      setPill("error", false, true);
+      $("#status").innerHTML = '<span style="color:var(--red)">' + esc(r.error) + "</span>";
+      $("#go").disabled = false;
+    } else {
+      // Kemajuan NYATA dari tahap pipeline. Dipakai step-1 supaya bar tidak
+      // mendahului pekerjaan yang belum rampung.
+      const step = r.step || 0, total = r.total || 9;
+      showBar(Math.max(3, Math.round(((step - 1) / total) * 100)), true);
+      setPill(`tahap ${step}/${total}`, true);
+      $("#status").innerHTML = esc(r.stage || r.status) +
+        `<br><span style="font-family:var(--mono)">${secs} detik</span>`;
+      setTimeout(tick, 1500);
+    }
+  };
+  tick();
+}
+
+function showBar(percent, busy) {
+  const bar = $("#bar");
+  bar.style.display = "block";
+  bar.classList.toggle("busy", !!busy);
+  bar.firstElementChild.style.width = percent + "%";
+}
+function setPill(text, busy, bad) {
+  const pill = $("#tb-status");
+  pill.className = "status-pill" + (busy || bad ? " warn" : "");
+  pill.innerHTML = '<span class="status-dot"></span> ' + esc(text);
+}
+
+/* ---------------- riwayat ---------------- */
+async function loadHistory() {
+  const items = await api("/api/analysis");
+  const colour = s => s === "done" ? "green" : s === "error" ? "red" : "amber";
+  $("#history").innerHTML = items.map(i => `
+    <li data-id="${i.analysis_id}" class="${selected.has(i.analysis_id) ? "sel" : ""}">
+      <span class="dot" style="background:var(--${colour(i.status)})"></span>
+      <span class="nm" title="${esc(i.filename)} · ${esc(i.analyzed_at)}">${esc(i.filename || i.analysis_id)}</span>
+      <span class="del" title="hapus">&#10005;</span>
+    </li>`).join("") || '<li style="color:var(--dim);cursor:default">belum ada</li>';
+
+  $("#history").querySelectorAll("li[data-id]").forEach(li => {
+    const id = li.dataset.id;
+    li.querySelector(".del").onclick = async e => {
+      e.stopPropagation();
+      if (!confirm("Hapus analisis ini beserta berkas unggahan dan hasil carving-nya?")) return;
+      await api("/api/analysis/" + id, { method: "DELETE" });
+      selected.delete(id);
+      $("#pack").disabled = selected.size < 2;
+      loadHistory();
+    };
+    li.onclick = async e => {
+      if (e.ctrlKey || e.metaKey) {
+        selected.has(id) ? selected.delete(id) : selected.add(id);
+        li.classList.toggle("sel");
+        $("#pack").disabled = selected.size < 2;
+        return;
+      }
+      render(await api("/api/analysis/" + id));
+    };
+  });
+}
+
+$("#wipe").onclick = async () => {
+  if (!confirm("Hapus SELURUH riwayat analisis, berkas unggahan, dan hasil carving?\n" +
+               "Feed threat intel tidak ikut terhapus.")) return;
+  const r = await api("/api/analysis", { method: "DELETE" });
+  selected.clear();
+  $("#pack").disabled = true;
+  $("#result").innerHTML = `<div class="empty">${r.deleted_count} analisis dihapus
+    (${r.uploads} berkas unggahan, ${r.carved} objek carving).</div>`;
+  setPill("siap", false);
+  $("#tb-title").innerHTML = "Network Forensics Dashboard";
+  loadHistory();
+};
+
+$("#pack").onclick = async () => {
+  renderPack(await api("/api/evidence-pack", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify([...selected]) }));
+};
+
+/* ---------------- helper render ---------------- */
+const sev = level => `<span class="sev-badge sev-${esc((level || "LOW").toUpperCase())}">${esc(level || "—")}</span>`;
+const outcome = o => `<span class="outcome-tag out-${esc(o)}">${esc((o || "").replace("_", " "))}</span>`;
+const statusClass = code => !code ? "" : "s" + String(code)[0] + "xx";
+
+// Filter bisa diklik untuk disalin -- memindahkannya ke Wireshark tanpa
+// mengetik ulang adalah alasan utama halaman ini ada.
+function filter(q) {
+  return q ? `<code class="filter" onclick="copyFilter(this)">${esc(q)}</code>` : "";
+}
+function copyFilter(el) {
+  navigator.clipboard.writeText(el.textContent.trim());
+  el.classList.add("copied");
+  setTimeout(() => el.classList.remove("copied"), 1200);
+}
+function section(title, count, inner) {
+  return inner ? `<div class="section"><div class="section-head"><h2>${esc(title)}</h2>
+    ${count != null ? `<span class="count">${esc(count)}</span>` : ""}</div>${inner}</div>` : "";
+}
+function kv(pairs) {
+  return pairs.filter(([, v]) => v != null && v !== "").map(([k, v]) =>
+    `<div class="kv-row"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`).join("");
+}
+function cells(pairs) {
+  return `<div class="summary-grid">` + pairs.filter(([, v]) => v != null && v !== "")
+    .map(([label, value, danger]) => `<div class="summary-cell">
+      <div class="summary-label">${esc(label)}</div>
+      <div class="summary-value${danger ? " danger" : ""}">${esc(value)}</div></div>`).join("")
+    + `</div>`;
+}
+// Sorot bagian request yang memicu deteksi. Pola berasal dari Python; sebagian
+// besar kompatibel dengan JS, tapi kalau tidak, cukup tampilkan tanpa sorotan.
+function highlight(text, pattern) {
+  if (!pattern) return esc(text);
+  try {
+    const m = new RegExp(pattern, "i").exec(text);
+    if (!m || !m[0]) return esc(text);
+    const i = m.index;
+    return esc(text.slice(0, i)) + `<span class="hl">${esc(m[0])}</span>` + esc(text.slice(i + m[0].length));
+  } catch { return esc(text); }
+}
+
+/* ---------------- render utama ---------------- */
+function render(r) {
+  const isPcap = "all_sessions" in r;
+  $("#tb-title").innerHTML = "Network Forensics Dashboard — <strong>" + esc(r.filename || "") + "</strong>";
+  setPill("analysis complete", false);
+
+  const out = [];
+  out.push(header(r, isPcap));
+  out.push(alertBanner(r));
+  out.push(summary(r, isPcap));
+  out.push(owaspCategories(r));
+  out.push(findings(r));
+  out.push(memorySection(r));
+  out.push(diskSection(r));
+  out.push(profileAndMitre(r));
+  out.push(sessionTable(r));
+  out.push(narrative(r));
+  out.push(appendix(r));
+  $("#result").innerHTML = out.filter(Boolean).join("");
+  window.scrollTo(0, 0);
+}
+
+function header(r, isPcap) {
+  const info = r.capture_info || {};
+  const bits = [];
+  if (info.first_packet) bits.push(`Capture: ${info.first_packet} — ${info.last_packet}`);
+  if (info.packet_count) bits.push(`${info.packet_count.toLocaleString()} paket`);
+  if (r.file_size) bits.push(`${(r.file_size / 1048576).toFixed(1)} MB`);
+  if (r.file_type) bits.push(esc(r.file_type));
+  bits.push(esc(r.analyzed_at || ""));
+
+  const worst = worstLevel(r);
+  const kind = isPcap ? (r.owasp_summary?.total ? "OWASP Top 10 pattern detected"
+                        : worst === "HIGH" ? "Indikator C2 terdeteksi" : "Analisis lalu lintas")
+                      : (r.file_category || "berkas");
+  return `<div class="header-row">
+    <div><h1>${esc(r.filename || r.analysis_id)}</h1>
+    <div class="subtitle">${bits.join(" · ")}</div></div>
+    <div class="kind-tag ${worst === "HIGH" ? "" : "calm"}">● ${esc(kind)}</div></div>`;
+}
+
+// Kategori yang benar-benar berarti "seseorang MENYERANG host ini".
+// 'Kredensial di URL' TIDAK termasuk: pada host terinfeksi, yang mengirim token
+// di query string justru korbannya sendiri saat menghubungi C2. Menyebutnya
+// 'sumber serangan' akan menuduh korban sebagai penyerang di dalam laporan.
+const ATTACK_CATEGORIES = /Injection|Path Traversal|Request Forgery/;
+
+function attackers(r) {
+  const hits = (r.owasp_findings || []).filter(f => ATTACK_CATEGORIES.test(f.owasp_category));
+  return [...new Set(hits.map(f => f.src_ip))];
+}
+
+function worstLevel(r) {
+  const levels = [...(r.key_events || []).map(e => e.confidence),
+                  ...(r.owasp_findings || []).map(f => f.confidence),
+                  ...(r.evidence_index || []).length && (r.threat_feed_hits || [])
+                    .filter(h => !h.shared_hosting).map(() => "HIGH") || [],
+                  ...((r.memory || {}).process_hollowing || []).map(() => "HIGH")];
+  return levels.includes("HIGH") ? "HIGH" : levels.includes("MEDIUM") ? "MEDIUM" : "LOW";
+}
+
+function alertBanner(r) {
+  const parts = [];
+  const owasp = r.owasp_summary || {};
+  const attacker = attackers(r);
+  const attackCats = Object.keys(owasp.by_category || {}).filter(c => ATTACK_CATEGORIES.test(c));
+  if (attackCats.length) parts.push(`<strong>${attackCats.length} kategori serangan
+    OWASP Top 10</strong> dari ${esc(attacker.join(", "))}`);
+  else if (owasp.total) parts.push(`<strong>${owasp.total} request</strong> mengandung
+    kredensial/token di URL`);
+  const c2 = (r.key_events || []).filter(e => e.category === "http_candidate_c2");
+  if (c2.length) parts.push(`<strong>${c2.length} destinasi HTTP tidak terenkripsi</strong>
+    yang perlu diperiksa sebagai kandidat C2`);
+  const beacons = (r.beacons || []).filter(b => b.is_suspected_beacon && !b.is_known_noise);
+  if (beacons.length) parts.push(`<strong>${beacons.length} pola koneksi berkala</strong>`);
+  const hollow = (r.memory || {}).process_hollowing || [];
+  if (hollow.length) parts.push(`<strong>${hollow.length} proses ter-hollowing</strong>
+    (${esc(hollow.map(h => h.process_name).join(", "))})`);
+  const deleted = (r.disk || {}).deleted_count;
+  if (deleted) parts.push(`<strong>${deleted} berkas terhapus</strong> masih bisa direcover`);
+  const feed = (r.threat_feed_hits || []).filter(h => !h.shared_hosting);
+  if (feed.length) parts.push(`<strong>${feed.length} IOC</strong> cocok dengan feed abuse.ch`);
+
+  const total = (r.evidence_index || []).length;
+  if (!parts.length) {
+    return `<div class="alert-banner calm"><div class="alert-icon">i</div>
+      <div class="alert-text">Tidak ada indikator menonjol berdasarkan kriteria yang diterapkan.
+      <strong>Ketiadaan temuan bukan berarti bersih</strong> — hanya berarti pola yang diperiksa
+      tidak muncul dalam rentang capture ini.</div>
+      <div class="alert-count">${total}<span>evidence tercatat</span></div></div>`;
+  }
+  return `<div class="alert-banner"><div class="alert-icon">!</div>
+    <div class="alert-text">Ditemukan ${parts.join(", ")}.</div>
+    <div class="alert-count">${total}<span>evidence tercatat</span></div></div>`;
+}
+
+function summary(r, isPcap) {
+  const i = r.identity || {};
+  const s = r.session_summary || {};
+  if (isPcap) {
+    const attacker = attackers(r);
+    return cells([
+      ["Host dianalisis", i.ip],
+      attacker.length ? ["Sumber serangan", attacker.join(", "), true] : ["MAC", i.mac],
+      ["Hostname", (i.hostname || []).join(" / ") || "—"],
+      ["Username", i.username || "—"],
+      i.full_name ? ["Full name", i.full_name] : null,
+      ["Sesi TCP", `${s.total_sessions} (${s.sessions_outbound}↑ / ${s.sessions_inbound}↓)`],
+      ["Berisi payload", `${s.sessions_with_payload} dari ${s.total_sessions}`],
+    ].filter(Boolean));
+  }
+  const h = r.exact_hashes || {};
+  return cells([
+    ["Kategori", r.file_category],
+    ["Tipe", r.file_type],
+    ["Ukuran", (r.file_size / 1048576).toFixed(2) + " MB"],
+    ["SHA256", (h.sha256 || "").slice(0, 32) + "…"],
+    ["Threat feed", (r.threat_feed_match || {}).is_known_malicious
+      ? "COCOK — " + r.threat_feed_match.source : "tidak terdaftar",
+      (r.threat_feed_match || {}).is_known_malicious],
+  ]);
+}
+
+function owaspCategories(r) {
+  const by = (r.owasp_summary || {}).by_category;
+  if (!by || !Object.keys(by).length) return "";
+  const all = { "A01:2021 - Broken Access Control (Path Traversal)": "Path Traversal",
+    "A02:2021 - Cryptographic Failures (kredensial di URL)": "Kredensial di URL",
+    "A03:2021 - Injection (SQLi)": "Injection — SQLi",
+    "A03:2021 - Injection (XSS)": "Injection — XSS",
+    "A03:2021 - Injection (Command)": "Injection — Command",
+    "A10:2021 - Server-Side Request Forgery": "SSRF" };
+  const cards = Object.entries(all).map(([key, name]) => {
+    const n = by[key] || 0;
+    return `<div class="cat-card ${n ? "hit" : ""}">
+      <div class="oc-id">${esc(key.split(" - ")[0])}</div>
+      <div class="oc-name">${esc(name)}</div>
+      <div class="oc-count">${n}</div>
+      <div class="oc-label">request ditandai</div></div>`;
+  }).join("");
+  return section("OWASP Top 10 — Category Breakdown", null, `<div class="cat-grid">${cards}</div>`);
+}
+
+function findings(r) {
+  const cards = [];
+
+  (r.owasp_findings || []).slice(0, 40).forEach(f => {
+    // Disorot pada request_snippet (sudah ter-URL-decode), BUKAN request_uri.
+    // Pola dicocokkan detektor terhadap versi ter-decode, jadi menyorot versi
+    // ter-encode hampir selalu gagal -- payload '%27%20UNION' tidak akan pernah
+    // cocok dengan pola yang mencari "' UNION".
+    const shown = (f.request_snippet || f.request_uri || "").trim();
+    const req = `<span class="req-method">${esc(f.http_method || "GET")}</span>
+      ${highlight(shown, f.matched_pattern)} HTTP/1.1<br>
+      Host: <span class="req-host">${esc(f.host || f.dst_ip)}</span>`;
+    const body = f.response_body_snippet;
+    const resp = f.response_status ? `<div class="resp-block ${esc(f.outcome)}">
+        <span class="resp-status ${statusClass(f.response_status)}">HTTP ${f.response_status}</span>
+        ${body ? `<div class="resp-body">${esc(body.slice(0, 300))}</div>` : ""}</div>`
+      : `<div class="resp-block"><span class="resp-status">tidak ada response</span>
+         <div class="resp-body">Koneksi kemungkinan di-drop atau di-reset.</div></div>`;
+    cards.push(`<div class="finding">
+      <div class="finding-head">${sev(f.confidence)}
+        <span class="finding-cat">${esc(f.owasp_category)}</span>
+        <span class="finding-time">${esc(f.time_utc || "")}</span>
+        ${outcome(f.outcome)}</div>
+      <div class="finding-body">
+        <div class="finding-meta">
+          <span><strong>src:</strong> ${esc(f.src_ip)}</span>
+          <span><strong>dst:</strong> ${esc(f.dst_ip)}</span>
+          <span><strong>frame:</strong> #${esc(f.frame_number)}</span></div>
+        <div class="req-block">${req}</div>
+        <div class="pattern-match"><span class="label">pola cocok</span>${esc(f.matched_pattern)}</div>
+        ${resp}
+        ${filter(f.evidence_query)}
+        <div class="fp-note"><span class="fp-dot" style="background:var(--${
+          f.confidence === "HIGH" ? "red" : "amber"})"></span>
+          Signature-based — rawan false positive. Outcome <strong>${esc(f.outcome)}</strong>
+          ditentukan dari status dan isi response, bukan dari payload saja.</div>
+      </div></div>`);
+  });
+
+  (r.key_events || []).filter(e => e.category !== "capture_start").forEach(e => {
+    cards.push(`<div class="finding">
+      <div class="finding-head">${sev(e.confidence)}
+        <span class="finding-cat">${esc(e.category)}</span>
+        <span class="finding-time">${esc(e.time_utc || "")}</span></div>
+      <div class="finding-body">
+        <div style="font-size:12.5px">${esc(e.description)}</div>
+        ${filter(e.evidence_query)}</div></div>`);
+  });
+
+  (r.beacons || []).filter(b => b.is_suspected_beacon).slice(0, 10).forEach(b => {
+    cards.push(`<div class="finding">
+      <div class="finding-head">${sev(b.confidence)}
+        <span class="finding-cat">Pola koneksi berkala — ${esc(b.label)}</span>
+        <span class="finding-time">${esc(b.connection_count)} koneksi</span></div>
+      <div class="finding-body">
+        <div class="finding-meta">
+          <span><strong>interval:</strong> ${b.mean_interval_sec}s</span>
+          <span><strong>CV:</strong> ${b.coefficient_variation}</span>
+          <span><strong>port:</strong> ${esc((b.ports || []).join(", "))}</span></div>
+        ${filter(b.evidence_query)}
+        ${b.is_known_noise ? `<div class="fp-note"><span class="fp-dot"
+          style="background:var(--amber)"></span>Destinasi ini termasuk layanan umum yang
+          memang berpola reguler — verifikasi manual sebelum dilaporkan sebagai C2.</div>` : ""}
+      </div></div>`);
+  });
+
+  return cards.length ? section("Temuan", cards.length + " ditampilkan", cards.join("")) : "";
+}
+
+function memorySection(r) {
+  const m = r.memory;
+  if (!m || !m.available) return "";
+  const rows = [];
+  (m.process_hollowing || []).forEach(h => rows.push(`<div class="finding">
+    <div class="finding-head">${sev("HIGH")}
+      <span class="finding-cat">Process hollowing — ${esc(h.process_name)}</span>
+      <span class="finding-time">PID ${h.pid}</span></div>
+    <div class="finding-body">
+      <div style="font-size:12.5px">${esc(h.note)}</div>
+      <div class="req-block">${esc(h.args)}</div>
+      ${filter("vol -f <dump> windows.cmdline --pid " + h.pid)}</div></div>`));
+
+  (m.suspicious_command_lines || []).forEach(c => rows.push(`<div class="finding">
+    <div class="finding-head">${sev(c.confidence)}
+      <span class="finding-cat">${esc(c.process)}</span>
+      <span class="finding-time">PID ${c.pid}</span></div>
+    <div class="finding-body">
+      <div style="font-size:12.5px">${esc(c.reasons.join("; "))}</div>
+      <div class="req-block">${esc(c.args)}</div>
+      ${c.known_legitimate ? `<div class="fp-note"><span class="fp-dot"
+        style="background:var(--green)"></span>Lokasi sah untuk proses ini:
+        ${esc(c.known_legitimate)}</div>` : ""}</div></div>`));
+
+  const inject = (m.code_injection_by_process || []).map(i => `<div class="kv-row">
+    <span class="k">${esc(i.process)} · PID ${i.pid}</span>
+    <span class="v">${i.region_count} region RWX${i.known_false_positive
+      ? ` <span style="color:var(--dim)">— ${esc(i.known_false_positive)}</span>` : ""}</span></div>`).join("");
+
+  const conns = (m.external_connections || []).slice(0, 12).map(c => `<div class="kv-row">
+    <span class="k">${esc(c.Owner)} · PID ${c.PID}</span>
+    <span class="v">${esc(c.ForeignAddr)}:${esc(c.ForeignPort)} ${esc(c.State || "")}</span></div>`).join("");
+
+  return section("RAM dump", `${m.process_count} proses · ${m.connections.length} koneksi`,
+    rows.join("") +
+    (inject ? `<div class="panel" style="margin-bottom:13px">
+      <div class="summary-label">malfind — region executable + writable</div>${inject}</div>` : "") +
+    (conns ? `<div class="panel"><div class="summary-label">Koneksi ke IP eksternal</div>${conns}</div>` : ""));
+}
+
+function diskSection(r) {
+  const d = r.disk;
+  if (!d || !d.available) return "";
+  const rows = (d.deleted_files || []).slice(0, 30).map(f => `<tr>
+    <td class="mono">${esc(f.inode)}</td><td class="mono">${esc(f.file_path)}</td>
+    <td class="mono">${f.size_bytes ?? "—"}</td>
+    <td class="mono">${esc(f.mtime ? new Date(f.mtime * 1000).toISOString().slice(0, 19) : "—")}</td>
+  </tr>`).join("");
+  return section("Disk image", `${d.total_files} berkas · ${d.deleted_count} terhapus`,
+    `<div class="panel"><div class="tbl-wrap"><table>
+      <thead><tr><th>inode</th><th>path</th><th>ukuran</th><th>modified</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="4" style="color:var(--dim)">tidak ada berkas terhapus</td></tr>'}</tbody>
+    </table></div>
+    <div class="footnote">Berkas terhapus bisa diekstrak dengan
+      <code>icat -o ${d.offset_used} &lt;image&gt; &lt;inode&gt;</code> selama blok datanya
+      belum ditimpa.</div></div>`);
+}
+
+function profileAndMitre(r) {
+  const i = r.identity || {};
+  const geo = (r.geoip || {}).results || [];
+  const attacker = attackers(r)[0];
+  const attackFindings = (r.owasp_findings || []).filter(f => ATTACK_CATEGORIES.test(f.owasp_category));
+  const profileRows = attacker ? kv([
+    ["Sumber serangan", `<span style="color:var(--red);font-family:var(--mono);font-weight:700">${esc(attacker)}</span>`],
+    ["Temuan serangan", attackFindings.length],
+    ["Endpoint disasar", [...new Set(attackFindings.map(f => (f.request_uri || "").split("?")[0]))].slice(0, 4).join(", ")],
+    ["GeoIP", (geo.find(g => g.ip === attacker) || {}).country],
+  ]) : kv([
+    ["IP", i.ip], ["MAC", i.mac], ["Hostname", (i.hostname || []).join(" / ")],
+    ["Username", i.username], ["Full name", i.full_name],
+    ["Tebakan target", (r.host_ranking || [])[0]
+      ? `${r.host_ranking[0].packets_total.toLocaleString()} paket` : null],
+  ]);
+
+  const mitre = (r.mitre || []).map(m => `<div class="kv-row">
+    <span class="k" style="color:var(--purple);font-weight:700">${esc(m.technique)}</span>
+    <span class="v">${esc(m.name)}</span></div>`).join("");
+
+  if (!profileRows && !mitre) return "";
+  return `<div class="two-col">
+    ${profileRows ? section(attacker ? "Profil penyerang" : "Profil host", null,
+      `<div class="panel">${profileRows}</div>`) : ""}
+    ${mitre ? section("MITRE ATT&CK", null, `<div class="panel">${mitre}</div>`) : ""}
+  </div>`;
+}
+
+function sessionTable(r) {
+  const sessions = r.all_sessions || [];
+  if (!sessions.length) return "";
+  const withPayload = sessions.filter(s => s.has_payload);
+  const shown = (withPayload.length ? withPayload : sessions).slice(0, 60);
+  const rows = shown.map(s => `<tr>
+    <td class="mono">${esc(s.time_utc || "")}</td>
+    <td class="mono">${esc(s.direction === "inbound" ? "↓" : "↑")} ${esc(s.dst_ip)}</td>
+    <td class="mono">${esc((s.resolved_names || [])[0] || "—")}</td>
+    <td class="mono">${s.dst_port ?? "—"}</td>
+    <td style="color:var(--${s.has_payload ? "text" : "dim"})">${esc(s.summary)}</td>
+    <td class="mono">#${s.frame_number}</td></tr>`).join("");
+  const sum = r.session_summary || {};
+  return section("Log sesi koneksi", `${sum.total_sessions} sesi`,
+    `<div class="panel"><div class="tbl-wrap"><table>
+      <thead><tr><th>waktu</th><th>peer</th><th>domain</th><th>port</th><th>ringkasan</th><th>frame</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <div class="footnote">${sum.sessions_with_payload} sesi berisi payload,
+      ${sum.sessions_idle} hanya handshake tanpa muatan. Sesi idle sengaja TIDAK dibuang —
+      supaya jumlah total bisa di-cross-check saat menyusun laporan.
+      ${shown.length < sessions.length ? `Ditampilkan ${shown.length} dari ${sessions.length}.` : ""}</div>
+    </div>`);
+}
+
+function narrative(r) {
+  if (!r.narrative) return "";
+  return section("Narasi siap tempel", null,
+    `<div class="panel">
+      <button class="ghost" onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent)">Salin</button>
+      <div class="copy-block" style="margin-top:10px">${esc(r.narrative)}</div></div>`);
+}
+
+function appendix(r) {
+  const records = r.evidence_index || [];
+  if (!records.length) return "";
+  return section("Lampiran reproduksibilitas", records.length + " temuan",
+    `<div class="panel">` + records.map(e => `
+      <div style="margin-bottom:16px">
+        <div style="font-size:12.5px"><strong style="color:var(--bright)">${esc(e.finding_type)}</strong>
+          — ${esc(e.result)}</div>
+        ${filter(e.wireshark_filter)}
+        ${e.note ? `<div class="fp-note"><span class="fp-dot" style="background:var(--dim)"></span>${esc(e.note)}</div>` : ""}
+      </div>`).join("") +
+    `<div class="footnote">Setiap filter di atas bisa dijalankan langsung di Wireshark
+      atau tshark untuk memverifikasi temuannya. Klik untuk menyalin.</div></div>`);
+}
+
+function renderPack(r) {
+  $("#tb-title").innerHTML = "Network Forensics Dashboard — <strong>evidence pack</strong>";
+  const cards = (r.correlations || []).map(c => `<div class="finding">
+    <div class="finding-head">${sev(c.confidence)}
+      <span class="finding-cat">${esc(c.type)}</span></div>
+    <div class="finding-body">
+      <div style="font-size:12.5px">${esc(c.description)}</div>
+      ${filter(c.evidence_query)}
+      ${c.why_it_matters ? `<div class="fp-note"><span class="fp-dot"
+        style="background:var(--purple)"></span>${esc(c.why_it_matters)}</div>` : ""}
+    </div></div>`).join("");
+  $("#result").innerHTML =
+    `<div class="header-row"><div><h1>Korelasi lintas evidence</h1>
+      <div class="subtitle">${esc((r.sources_used || []).join(" · "))}</div></div></div>` +
+    (r.warning ? `<div class="alert-banner"><div class="alert-icon">!</div>
+      <div class="alert-text">${esc(r.warning)}</div></div>` : "") +
+    section("Evidence yang dipakai", null, `<div class="panel">` +
+      kv((r.inputs || []).map(i => [i.role, esc(i.filename)])) + `</div>`) +
+    section("Korelasi", r.correlation_count,
+      cards || `<div class="panel"><p style="color:var(--dim)">Tidak ada irisan antar
+        evidence yang terpilih.</p></div>`) +
+    `<div class="footnote">${esc(r.note || "")}</div>`;
+  window.scrollTo(0, 0);
+}
+
+/* ---------------- status tool ---------------- */
+api("/api/system/tools").then(t => {
+  const missing = Object.entries(t).filter(([, v]) => !v.available);
+  const total = Object.keys(t).length;
+  const el = document.createElement("span");
+  el.className = "subtitle";
+  el.style.cssText = "margin-left:12px;font-size:11px";
+  el.textContent = `${total - missing.length}/${total} tool`;
+  if (missing.length) el.title = missing.map(([k, v]) => `${k}: ${v.hint}`).join("\n");
+  $("#tb-title").after(el);
+});
+loadHistory();
+</script>

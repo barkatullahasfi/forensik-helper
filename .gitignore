@@ -1,0 +1,48 @@
+# Hasil analisis, unggahan, dan berkas carving
+storage/
+
+# BERKAS EVIDENCE -- JANGAN PERNAH DI-COMMIT.
+#
+# Berkas bukti bisa memuat data pribadi, kredensial, atau materi kasus yang
+# tidak boleh tersebar. Sekali ter-push ke repo publik, ia tetap ada di riwayat
+# git meskipun dihapus di commit berikutnya.
+*.pcap
+*.pcapng
+*.cap
+*.mem
+*.vmem
+*.dmp
+*.raw
+*.dd
+*.E01
+*.e01
+*.vmdk
+*.img
+*.lime
+
+# Fixture yang di-generate: buat ulang dengan
+#   python tests/make_disk_fixture.py
+tests/fixtures/
+
+# Basis data GeoLite2 (unduh sendiri dari akun MaxMind)
+*.mmdb
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Konfigurasi lokal
+.env
+.env.local
+
+# Editor & OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
