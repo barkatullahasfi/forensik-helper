@@ -17,7 +17,7 @@ from pathlib import Path
 from . import config as settings
 from .services import (binary_analyzer, disk_image_analyzer, hash_analyzer,
                        location_analyzer, memory_analyzer, metadata_extractor,
-                       steganography_detector, threat_feed)
+                       steganography_detector, threat_feed, unpacker)
 from .services.timeline_builder import EvidenceLog
 
 DISK_IMAGE_EXT = {".e01", ".dd", ".raw", ".img", ".vmdk", ".001"}
@@ -42,6 +42,8 @@ def categorize(path: Path, mime: str) -> str:
         return "video"
     if ext in BINARY_EXT or mime in ("application/x-dosexec", "application/x-msdownload"):
         return "binary"
+    if ext in (".apk", ".xapk", ".aab", ".jar", ".zip", ".war", ".ipa"):
+        return "archive"
     if ext in DISK_IMAGE_EXT:
         return "disk_image"
     if ext in MEMORY_EXT:
@@ -49,6 +51,60 @@ def categorize(path: Path, mime: str) -> str:
     if mime.startswith("text/") or ext in {".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".odt"}:
         return "document"
     return "generic"
+
+
+def _unpack_and_reanalyze(path, pe_info, checker, evidence, progress) -> dict:
+    """
+    Bongkar berkas, lalu jalankan analisis binary ULANG pada hasilnya.
+
+    Ini yang menutup celah paling merepotkan: IOC di dalam berkas ter-pack tidak
+    terlihat sampai berkasnya dibongkar. Menganalisis berkas asli lalu berhenti
+    di situ menghasilkan "tidak ditemukan domain apa pun" -- kesimpulan yang
+    salah, bukan temuan negatif.
+    """
+    out_dir = settings.STORAGE / "unpacked" / path.stem
+    result = unpacker.unpack(path, out_dir, pe_info, evidence)
+    if not result.get("success"):
+        return {"unpacked": result}
+
+    progress(f"      dibongkar ({result['method']}) — menganalisis ulang isinya...")
+    inner = []
+    for extracted in result["files"][:40]:
+        target = Path(extracted)
+        if target.stat().st_size < 64:
+            continue
+        info = hash_analyzer.analyze_file(target, checker)
+        # Analisis binary penuh hanya untuk berkas yang memang kode; untuk isi
+        # arsip lain, hash dan IOC dari strings sudah cukup.
+        if info["file_type"].endswith(("executable", "x-dosexec")) or \
+                target.suffix.lower() in (".exe", ".dll", ".dex", ".so"):
+            info["iocs"] = binary_analyzer.find_iocs_in_strings(
+                binary_analyzer.extract_strings(target))
+        else:
+            info["iocs"] = binary_analyzer.find_iocs_in_strings(
+                binary_analyzer.extract_strings(target, min_length=8))
+        inner.append(info)
+
+    merged = {"ips": set(), "urls": set(), "domains": set()}
+    for info in inner:
+        for key in merged:
+            merged[key].update(info.get("iocs", {}).get(key, []))
+    for url in sorted(merged["urls"])[:15]:
+        evidence.track("unpacked_url", f"strings <hasil bongkaran {path.name}>", url,
+                       note="URL ditemukan SETELAH pembongkaran — tidak terlihat di "
+                            "berkas aslinya yang masih ter-pack")
+    for domain in sorted(merged["domains"])[:25]:
+        evidence.track("unpacked_domain", f"strings <hasil bongkaran {path.name}>", domain,
+                       note="Domain ditemukan setelah pembongkaran. Cocokkan dengan "
+                            "lalu lintas DNS di pcap untuk memastikan ia benar-benar "
+                            "dihubungi, bukan sekadar tertanam di kode")
+
+    extra = {"unpacked": result,
+             "unpacked_files": inner,
+             "unpacked_iocs": {k: sorted(v) for k, v in merged.items()}}
+    if result.get("container_type") == "apk":
+        extra["apk"] = unpacker.summarize_apk(result["files"])
+    return extra
 
 
 def analyze(path, progress=print) -> dict:
@@ -86,6 +142,9 @@ def analyze(path, progress=print) -> dict:
             path, base["file_type"], evidence=evidence)
     if category == "binary":
         specific["binary"] = binary_analyzer.analyze_binary(path, checker, evidence)
+    if category in ("binary", "archive", "generic"):
+        specific.update(_unpack_and_reanalyze(
+            path, specific.get("binary", {}).get("pe"), checker, evidence, progress))
     if category == "disk_image":
         specific["disk"] = disk_image_analyzer.analyze_disk_image(path, evidence)
     if category == "memory_dump":
@@ -214,6 +273,35 @@ def print_report(result: dict) -> None:
         for file in disk.get("deleted_files", [])[:15]:
             print(f"    [terhapus] inode {file['inode']:<8} {file['file_path']} "
                   f"({file['size_bytes']} B)")
+
+    runtime = (result.get("binary") or {}).get("runtime") or {}
+    if runtime.get("runtime"):
+        print(f"    runtime   : {runtime['runtime']}  (penanda: {', '.join(runtime['markers'][:3])})")
+        if runtime.get("hint"):
+            print(f"                {runtime['hint']}")
+
+    unpacked = result.get("unpacked") or {}
+    if unpacked.get("success"):
+        print(f"\n  HASIL BONGKARAN ({unpacked['method']})")
+        if unpacked["method"] == "upx":
+            print(f"    {unpacked['original_size']} -> {unpacked['unpacked_size']} byte")
+        else:
+            print(f"    {unpacked['file_count']} berkas diekstrak ke {unpacked['output_dir']}")
+        for item in unpacked.get("rejected", []):
+            print(f"    [ditolak] {item['entry']}: {item['reason']}")
+        iocs = result.get("unpacked_iocs") or {}
+        for label in ("urls", "domains", "ips"):
+            for value in (iocs.get(label) or [])[:12]:
+                print(f"    {label[:-1]:<7}: {value[:110]}")
+        apk = result.get("apk") or {}
+        if apk.get("is_apk"):
+            print(f"    package : {apk.get('package_hint')}   {apk['dex_count']} berkas dex")
+            for perm in apk["dangerous_permissions"][:12]:
+                print(f"    izin    : {perm}")
+    elif unpacked.get("reason"):
+        print(f"\n  BONGKARAN: {unpacked['reason']}")
+        if unpacked.get("hint"):
+            print(f"    {unpacked['hint']}")
 
     print("\n" + "=" * 72)
     print(f"  APPENDIX ({len(result['evidence_index'])} temuan)")

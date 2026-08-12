@@ -578,6 +578,77 @@ def test_unknown_packer_says_so_instead_of_guessing():
     assert "packer khusus" in result["hint"]   # arahkan, jangan diam
 
 
+# ---------- Pembongkaran ----------
+
+def test_domain_filter_rejects_code_identifiers():
+    """
+    Tanpa daftar TLD, strings dari binary menghasilkan 'domain' seperti
+    'autoit.error' dan 'function.hcan' -- potongan pesan error dan nama fungsi.
+    Melaporkannya sebagai IOC membuat seluruh daftar tidak bisa dipercaya.
+    """
+    from backend.services.binary_analyzer import _plausible_domain
+    for junk in ("autoit.error", "function.hcan", "statement.orecursion",
+                 "declared.xarray", "msvcrt.dll", "config.json", "item.count"):
+        assert not _plausible_domain(junk), f"{junk} bukan domain"
+    for real in ("evil-c2.com", "cdn.example.org", "panel.duckdns.org",
+                 "taibeinan.cc", "filemegahab4.sbs"):
+        assert _plausible_domain(real), f"{real} domain sungguhan"
+
+
+def test_runtime_identified_from_strings():
+    """'Dropper AutoIt' dan 'RAT .NET' adalah dua dunia berbeda saat atribusi."""
+    from backend.services.binary_analyzer import identify_runtime
+    assert identify_runtime(["blah", "AU3!EA06", "x"])["runtime"] == "AutoIt"
+    assert identify_runtime(["mscoree.dll"])["runtime"] == ".NET"
+    assert identify_runtime(["PyInstaller", "_MEIPASS"])["runtime"] == "PyInstaller"
+    assert identify_runtime(["hello world"])["runtime"] is None
+
+
+def test_zip_slip_entries_rejected():
+    """
+    Nama entry berasal dari pembuat arsip: '../../evil' menulis DI LUAR
+    direktori tujuan. Harus ditolak sebelum apa pun menyentuh disk.
+    """
+    import zipfile
+    from backend.services.unpacker import unpack_zip
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "evil.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("aman.txt", "isi biasa")
+            z.writestr("../../keluar.txt", "mencoba lolos")
+        out = Path(tmp) / "hasil"
+        result = unpack_zip(archive, out)
+        assert result["success"]
+        assert any("zip slip" in r["reason"] for r in result["rejected"])
+        assert not (Path(tmp).parent / "keluar.txt").exists()
+        assert any("aman.txt" in f for f in result["files"])
+
+
+def test_zip_bomb_ratio_rejected():
+    """Arsip kecil yang mengembang ekstrem: satu berkas bukti tidak boleh memenuhi disk."""
+    import zipfile
+    from backend.services.unpacker import unpack_zip
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "bomb.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("bom.bin", "0" * 5_000_000)   # rasio kompresi sangat tinggi
+            z.writestr("kecil.txt", "isi biasa yang tidak terlalu terkompresi")
+        result = unpack_zip(archive, Path(tmp) / "hasil")
+        assert any("zip bomb" in r["reason"] for r in result["rejected"])
+
+
+def test_upx_unpack_never_touches_original():
+    """
+    Bukti tidak boleh diubah. upx membongkar di tempat secara bawaan, jadi
+    berkasnya WAJIB disalin dulu -- kalau tidak, hash evidence berubah.
+    """
+    import inspect
+    from backend.services import unpacker
+    source = inspect.getsource(unpacker.unpack_upx)
+    assert "copy.write_bytes" in source, "harus menyalin sebelum membongkar"
+    assert "-d" in source
+
+
 # ---------- Memory (parser command line Volatility) ----------
 
 STARTUP_PATH = (r'"C:\Users\admin\AppData\Roaming\Microsoft\Windows\Start Menu'

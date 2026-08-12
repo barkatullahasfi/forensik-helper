@@ -54,6 +54,8 @@ TOOLS = {
         "required": False,
     },
     "binwalk": {"pip": "binwalk", "apt": "binwalk", "required": False},
+    "upx": {"winget": "UPX.UPX", "apt": "upx-ucl", "brew": "upx", "required": False,
+            "note": "Untuk membongkar berkas ter-pack UPX sebelum analisis string"},
     # Sleuth Kit tidak punya paket winget mandiri. Rilis resmi Windows berupa ZIP
     # yang diekstrak apa adanya, sehingga NOMOR VERSI ikut jadi nama direktori --
     # karena itu win_paths di sini memakai wildcard.

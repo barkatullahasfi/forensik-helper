@@ -300,7 +300,11 @@ Dokumentasi otomatis di `/docs`. Endpoint utama:
 | `hash_analyzer` | MD5/SHA1/SHA256 + fuzzy hash + perbandingan berkas |
 | `metadata_extractor` | EXIF, GPS, authorship, anomali timestamp |
 | `steganography_detector` | Signature tersisip (tervalidasi), trailing data, LSB, steghide |
-| `binary_analyzer` | Strings ASCII+UTF-16, IOC, header PE, kapabilitas import |
+| `binary_analyzer` | Strings ASCII+UTF-16, IOC, header PE, packer, runtime, kapabilitas |
+| `unpacker` | Bongkar UPX dan arsip/APK, lalu analisis ulang isinya |
+| `smb_analyzer` | Tree connect, berkas di share, penandaan executable web |
+| `tool_fingerprint` | Identifikasi perkakas penyerang dari User-Agent |
+| `http_analyzer` | Transaksi HTTP lengkap: header, body, response |
 | `disk_image_analyzer` | Sleuth Kit: partisi, berkas terhapus, timeline MAC |
 | `memory_analyzer` | Volatility 3: proses, koneksi, cmdline, malfind, persistence |
 | `geoip_enrichment` | GeoLite2 lokal (opsional, butuh akun MaxMind gratis) |
@@ -350,6 +354,13 @@ memahami batasannya adalah cara tercepat menghasilkan kesimpulan yang salah.
   tidak dimasukkan ke narasi.
 - **Deteksi OWASP signature-based** — rawan false positive; verifikasi isi request
   lengkapnya sebelum menyimpulkan.
+- **Strings dari berkas ter-pack tidak mencerminkan isinya.** "Tidak ditemukan
+  domain apa pun" pada berkas ter-UPX adalah kesimpulan yang salah, bukan temuan
+  negatif — bongkar dulu. Alat ini membongkar UPX otomatis; packer lain
+  dilaporkan namanya beserta cara membongkarnya.
+- **Domain hasil ekstraksi strings perlu dicocokkan ke lalu lintas DNS.** Domain
+  yang tertanam di kode belum tentu pernah dihubungi, dan filter TLD tidak
+  sempurna — sisa false positive masih mungkin lolos.
 - **`System` PID 4 bukan nama layanan.** Di Windows, port 80 dan 445 dipegang
   HTTP.sys/SMB di kernel. Cari proses pekerjanya (mis. `w3wp.exe` untuk IIS).
 - **malfind punya false positive tetap.** Windows Defender, csrss, svchost, dan
@@ -368,8 +379,10 @@ memahami batasannya adalah cara tercepat menghasilkan kesimpulan yang salah.
 ### Yang sengaja tidak dilakukan
 
 - **Tidak ada database.** Hasil = satu JSON per analisis di `storage/analyses/`.
-- **Tidak menjalankan berkas apa pun.** Analisis binary murni statis. Tidak ada
-  sandbox — itu butuh environment terisolasi di luar lingkup alat ini.
+- **Tidak menjalankan berkas apa pun.** Analisis binary murni statis. Pembongkaran
+  UPX dan arsip dilakukan tanpa mengeksekusi isinya, dan selalu pada **salinan** —
+  berkas bukti tidak pernah diubah. Tidak ada sandbox; itu butuh environment
+  terisolasi di luar lingkup alat ini.
 - **Tidak scraping OSINT.** `osint_helper` menyusun query untuk dicek manual.
 - **Tidak ada CDN.** GUI memakai font sistem, jadi tetap berfungsi penuh saat
   mesin analisis offline.

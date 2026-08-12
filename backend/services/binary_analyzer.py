@@ -75,11 +75,50 @@ def _plausible_ip(ip: str) -> bool:
     return not all(int(p) < 20 for p in parts)
 
 
+# TLD yang benar-benar ada. Bukan daftar IANA lengkap -- cukup untuk memisahkan
+# domain dari identifier kode, yang merupakan sumber sampah terbesar.
+#
+# Tanpa daftar ini, strings dari binary menghasilkan "domain" seperti
+# 'autoit.error', 'function.hcan', dan 'statement.orecursion' -- potongan pesan
+# error dan nama fungsi yang kebetulan berisi titik. Melaporkannya sebagai IOC
+# membuat seluruh daftar tidak bisa dipercaya.
+COMMON_GTLDS = {
+    "com", "net", "org", "info", "biz", "edu", "gov", "mil", "int", "arpa",
+    "online", "site", "shop", "store", "top", "xyz", "club", "live", "life",
+    "world", "today", "space", "website", "tech", "app", "dev", "cloud", "host",
+    "link", "click", "download", "stream", "icu", "cyou", "monster", "rest",
+    "buzz", "work", "fun", "pro", "name", "mobi", "asia", "solutions", "digital",
+    "network", "systems", "services", "email", "support", "tools", "zone", "wiki",
+    "blog", "page", "run", "cfd", "sbs", "lat", "quest", "bond", "cam", "date",
+}
+# Seluruh ccTLD dua huruf dianggap sah -- memang begitu adanya.
+CCTLD_LENGTH = 2
+
+# Ekstensi berkas dan kata yang sering muncul setelah titik di dalam kode.
+NOT_TLDS = {"dll", "exe", "sys", "obj", "lib", "pdb", "dat", "bin", "tmp", "ini",
+            "log", "txt", "cpp", "res", "drv", "ocx", "xml", "json", "png", "jpg",
+            "error", "value", "count", "length", "name", "text", "type", "size"}
+
+
 def _plausible_domain(domain: str) -> bool:
-    """Buang nama fungsi/berkas yang kebetulan berbentuk domain (mis. 'msvcrt.dll')."""
-    tld = domain.rsplit(".", 1)[-1].lower()
-    return tld not in {"dll", "exe", "sys", "obj", "lib", "pdb", "dat", "bin", "tmp",
-                       "ini", "log", "txt", "cpp", "h", "c", "res", "drv", "ocx"}
+    """
+    Terima hanya yang TLD-nya sungguhan.
+
+    Memeriksa "bukan ekstensi berkas" saja tidak cukup: identifier kode punya
+    variasi tak terbatas ('function.hcan', 'g.hhh'), sedangkan TLD yang sah
+    jumlahnya terbatas. Menyaring dari sisi yang terbatas jauh lebih andal.
+    """
+    parts = domain.lower().split(".")
+    if len(parts) < 2:
+        return False
+    tld = parts[-1]
+    if tld in NOT_TLDS:
+        return False
+    if not (len(tld) == CCTLD_LENGTH or tld in COMMON_GTLDS):
+        return False
+    # Label sebelum TLD harus masuk akal sebagai nama domain.
+    label = parts[-2]
+    return 1 < len(label) <= 63 and not label.startswith("-") and not label.endswith("-")
 
 
 # Packer dikenali dari NAMA SECTION dan penanda di dalam berkas.
@@ -120,6 +159,41 @@ def identify_packer(file_path, section_names: list[str]) -> dict:
                     "packer khusus, berkas terenkripsi, atau sekadar sumber daya "
                     "terkompresi (gambar/video) di dalam binary",
             "confidence": "LOW"}
+
+
+# Runtime/compiler yang dipakai membangun berkas.
+#
+# Ini sering jadi titik awal atribusi keluarga malware: "dropper AutoIt" dan
+# "RAT .NET" adalah dua dunia berbeda, dan banyak keluarga malware konsisten
+# memakai satu runtime. Petunjuknya tertinggal di strings meski kodenya tidak
+# terbaca.
+RUNTIME_SIGNATURES = [
+    (("autoit", "au3!", "aut2exe"), "AutoIt",
+     "Skrip AutoIt yang dikompilasi. Skrip aslinya sering bisa diambil kembali "
+     "dengan Exe2Aut atau UnAutoIt"),
+    (("mscoree.dll", "_corexemain", "#strings", "#blob"), ".NET",
+     "Assembly .NET — dekompilasi dengan ILSpy/dnSpy mengembalikan kode sumber "
+     "yang nyaris utuh"),
+    (("pyinstaller", "pyi-", "_meipass"), "PyInstaller",
+     "Python yang dibundel. Ekstrak dengan pyinstxtractor lalu dekompilasi .pyc"),
+    (("py2exe", "python27.dll", "python3"), "py2exe/Python", None),
+    (("nullsoft install system", "nsis"), "NSIS installer",
+     "Installer — ekstrak isinya dengan 7-Zip"),
+    (("inno setup",), "Inno Setup installer", "Ekstrak dengan innounp"),
+    (("borland", "delphi", "tform"), "Delphi/Borland", None),
+    (("go build id", "runtime.gopanic"), "Go", None),
+    (("rust_begin_unwind", "rustc"), "Rust", None),
+    (("upx0", "upx1"), "UPX (packer, bukan runtime)", None),
+]
+
+
+def identify_runtime(strings_list: list[str]) -> dict:
+    haystack = "\n".join(strings_list).lower()
+    for markers, name, hint in RUNTIME_SIGNATURES:
+        hits = [m for m in markers if m in haystack]
+        if hits:
+            return {"runtime": name, "markers": hits, "hint": hint}
+    return {"runtime": None, "markers": [], "hint": None}
 
 
 def parse_pe_header(file_path) -> dict:
@@ -187,8 +261,14 @@ def analyze_binary(file_path, threat_checker=None,
     strings_list = extract_strings(path)
     iocs = find_iocs_in_strings(strings_list)
     pe = parse_pe_header(path)
+    runtime = identify_runtime(strings_list)
     result = {**analyze_file(path, threat_checker), "iocs": iocs, "pe": pe,
-              "string_count": len(strings_list)}
+              "runtime": runtime, "string_count": len(strings_list)}
+    if runtime["runtime"]:
+        evidence.track("binary_runtime", f"strings {path.name}", runtime["runtime"],
+                       note=f"Penanda: {', '.join(runtime['markers'])}."
+                            + (f" {runtime['hint']}" if runtime["hint"] else "")
+                            + " Runtime sering jadi titik awal atribusi keluarga malware.")
 
     if result.get("is_known_malicious"):
         evidence.track("binary_known_malicious", f"sha256 {result['exact_hashes']['sha256']}",
