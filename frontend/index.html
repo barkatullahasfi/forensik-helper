@@ -246,6 +246,28 @@ tr:last-child td { border-bottom:none; }
             border-left:2px solid var(--border); margin-top:12px; line-height:1.6; }
 .empty { color:var(--dim); font-size:13px; padding:40px 0; text-align:center; }
 
+/* Kronologi berfase. Garis vertikal memberi arah baca; tiap fase adalah
+   kelompok, bukan sekadar daftar panjang berurutan waktu. */
+.timeline { border-left:2px solid var(--border); padding-left:18px; margin-left:6px; }
+.phase { margin-bottom:22px; }
+.phase-head { font-family:var(--mono); font-size:11px; text-transform:uppercase;
+              letter-spacing:1px; color:var(--amber); margin:0 0 10px -25px;
+              display:flex; align-items:center; gap:8px; }
+.phase-head::before { content:""; width:9px; height:9px; border-radius:50%;
+                      background:var(--amber); flex-shrink:0; }
+.phase-count { font-size:10px; color:var(--dim); background:var(--panel-2);
+               padding:1px 7px; border-radius:9px; letter-spacing:0; }
+.tl-event { background:var(--panel); border:1px solid var(--border);
+            border-radius:7px; padding:11px 14px; margin-bottom:9px; position:relative; }
+.tl-event::before { content:""; position:absolute; left:-24px; top:16px;
+                    width:7px; height:7px; border-radius:50%; background:var(--border); }
+.tl-time { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+           font-family:var(--mono); font-size:10.5px; color:var(--dim);
+           margin-bottom:5px; }
+.tl-actor { font-weight:600; color:var(--bright); font-size:12.5px; }
+.tl-target { font-family:var(--mono); font-size:11px; color:var(--dim);
+             margin-top:4px; word-break:break-all; }
+
 /* Detail transaksi HTTP yang bisa dibuka. <details> dipakai apa adanya:
    native, jalan tanpa JS, dan bisa diakses lewat keyboard. */
 details.txn > summary { cursor:pointer; list-style:none; color:var(--text);
@@ -501,6 +523,7 @@ function render(r) {
   out.push(summary(r, isPcap));
   out.push(owaspCategories(r));
   out.push(findings(r));
+  out.push(attackTimelineSection(r));
   out.push(memorySection(r));
   out.push(diskSection(r));
   out.push(profileAndMitre(r));
@@ -564,9 +587,26 @@ function alertBanner(r) {
     yang perlu diperiksa sebagai kandidat C2`);
   const beacons = (r.beacons || []).filter(b => b.is_suspected_beacon && !b.is_known_noise);
   if (beacons.length) parts.push(`<strong>${beacons.length} pola koneksi berkala</strong>`);
-  const hollow = (r.memory || {}).process_hollowing || [];
+  // Temuan RAM dump WAJIB ikut dihitung. Tanpa ini, dump yang memuat eksekusi
+  // LOLBin, akses share jauh, dan koneksi C2 aktif tetap dilabeli "tidak ada
+  // indikator menonjol" -- judul yang menyangkal isi laporannya sendiri.
+  const m = r.memory || {};
+  const hollow = m.process_hollowing || [];
   if (hollow.length) parts.push(`<strong>${hollow.length} proses ter-hollowing</strong>
     (${esc(hollow.map(h => h.process_name).join(", "))})`);
+  const lolbin = m.lolbin_execution || [];
+  if (lolbin.length) parts.push(`<strong>${lolbin.length} eksekusi lewat utilitas Windows</strong>
+    (${esc([...new Set(lolbin.map(l => l.lolbin))].join(", "))})`);
+  const shares = m.remote_shares || [];
+  if (shares.length) parts.push(`<strong>akses share jarak jauh</strong> ke
+    ${esc([...new Set(shares.map(s => s.host))].join(", "))}`);
+  const hot = (m.notable_connections || []).filter(c => c.confidence === "HIGH");
+  if (hot.length) parts.push(`<strong>${hot.length} koneksi keluar janggal</strong>
+    (${esc(hot.map(c => c.foreign).slice(0, 3).join(", "))})`);
+  const persist = m.persistence || [];
+  if (persist.length) parts.push(`<strong>${persist.length} mekanisme persistence</strong>`);
+  const injected = (m.code_injection_by_process || []).filter(i => !i.known_false_positive);
+  if (injected.length) parts.push(`<strong>${injected.length} proses dengan memori RWX</strong>`);
   const deleted = (r.disk || {}).deleted_count;
   if (deleted) parts.push(`<strong>${deleted} berkas terhapus</strong> masih bisa direcover`);
   const feed = (r.threat_feed_hits || []).filter(h => !h.shared_hosting);
@@ -699,6 +739,56 @@ function findings(r) {
   });
 
   return cards.length ? section("Temuan", cards.length + " ditampilkan", cards.join("")) : "";
+}
+
+// Kronologi berfase. Dipakai baik hasil pcap maupun RAM dump -- keduanya
+// menghasilkan bentuk yang sama, jadi satu pelapor cukup.
+function attackTimelineSection(r) {
+  const t = r.attack_timeline || {};
+  const events = t.events || [];
+  if (!events.length) return "";
+
+  const phaseBlocks = Object.entries(t.phases || {}).map(([phase, list]) => {
+    if (!list.length) return "";
+    return `<div class="phase">
+      <div class="phase-head">${esc(phase)}<span class="phase-count">${list.length}</span></div>
+      ${list.map(e => `<div class="tl-event">
+        <div class="tl-time">${esc(e.time_utc || "waktu tidak tercatat")}
+          ${sev(e.confidence)}
+          ${e.is_inference ? '<span class="tag NOTE">inferensi</span>' : ""}</div>
+        <div class="tl-actor">${esc(e.actor || "?")}</div>
+        <div>${esc(e.action)}</div>
+        ${e.target ? `<div class="tl-target">&rarr; ${esc(e.target)}</div>` : ""}
+        ${e.data ? `<div class="fp-note"><span class="fp-dot"
+          style="background:var(--dim)"></span>${esc(e.data)}</div>` : ""}
+        ${filter(e.evidence_query)}
+      </div>`).join("")}
+    </div>`;
+  }).join("");
+
+  const header = [];
+  if (t.victim) header.push(`korban ${esc(t.victim)}`);
+  if (t.attacker) header.push(`penyerang ${esc(t.attacker)}`);
+  if ((t.accounts_involved || []).length)
+    header.push(`akun: ${esc(t.accounts_involved.join(", "))}`);
+
+  const movement = t.data_movement || {};
+  const flow = movement.verdict ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Aliran data</div>
+    <p style="font-size:12.5px">${esc(movement.verdict)}</p>
+    ${(movement.peers || []).slice(0, 6).map(p => `<div class="kv-row">
+      <span class="k">${esc(p.peer)}${p.is_attacker ? " · PENYERANG" : ""}</span>
+      <span class="v">keluar ${p.victim_sent_bytes.toLocaleString()} B ·
+        masuk ${p.victim_received_bytes.toLocaleString()} B</span></div>`).join("")}
+    ${movement.caveat ? `<div class="footnote">${esc(movement.caveat)}</div>` : ""}</div>` : "";
+
+  const gaps = (t.unresolved || []).length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Belum terjawab dari evidence ini</div>
+    ${t.unresolved.map(g => `<div class="fp-note"><span class="fp-dot"
+      style="background:var(--amber)"></span>${esc(g)}</div>`).join("")}</div>` : "";
+
+  return section("Kronologi serangan", header.join(" · ") || `${events.length} event`,
+    `<div class="timeline">${phaseBlocks}</div>${flow}${gaps}`);
 }
 
 function memorySection(r) {
