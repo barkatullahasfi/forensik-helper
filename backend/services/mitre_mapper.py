@@ -24,7 +24,24 @@ MITRE_RULES = [
     ("owasp_xss", "T1190", "Exploit Public-Facing Application"),
     ("owasp_command_injection", "T1190", "Exploit Public-Facing Application"),
     ("owasp_path_traversal", "T1083", "File and Directory Discovery"),
+    ("remote_share_access", "T1021.002", "Remote Services: SMB/Windows Admin Shares"),
+    ("smb_tree_connect", "T1021.002", "Remote Services: SMB/Windows Admin Shares"),
+    ("smb_web_executable", "T1505.003", "Server Software Component: Web Shell"),
+    ("attack_tool_identified", "T1595.002", "Active Scanning: Vulnerability Scanning"),
+    ("port_scan", "T1046", "Network Service Discovery"),
+    ("exposed_service", "T1046", "Network Service Discovery"),
+    ("persistence_mechanism", "T1547.001",
+     "Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder"),
+    ("memory_process_hollowing", "T1055.012", "Process Injection: Process Hollowing"),
+    ("memory_code_injection", "T1055", "Process Injection"),
+    ("binary_packer", "T1027.002", "Obfuscated Files or Information: Software Packing"),
+    ("suspicious_outbound_connection", "T1571", "Non-Standard Port"),
 ]
+
+# Eksekusi lewat utilitas Windows: sub-technique-nya ditentukan utilitas MANA
+# yang dipakai, jadi tidak bisa dipetakan dari nama temuan saja. Nilai MITRE-nya
+# sudah dihitung memory_analyzer dan dibawa di temuan itu sendiri.
+LOLBIN_FINDING = "lolbin_execution"
 
 
 def map_findings_to_mitre(finding_types: list[str]) -> list[dict]:
@@ -43,5 +60,21 @@ def map_findings_to_mitre(finding_types: list[str]) -> list[dict]:
     return sorted(by_technique.values(), key=lambda t: t["technique"])
 
 
-def map_from_evidence(evidence_records: list[dict]) -> list[dict]:
-    return map_findings_to_mitre([r["finding_type"] for r in evidence_records])
+def map_from_evidence(evidence_records: list[dict], extra: list[dict] | None = None) -> list[dict]:
+    """
+    `extra` memuat temuan yang sudah membawa ID MITRE sendiri (mis. eksekusi
+    LOLBin, yang sub-technique-nya bergantung pada utilitas mana yang dipakai
+    dan tidak bisa disimpulkan dari nama temuan).
+    """
+    mapped = map_findings_to_mitre([r["finding_type"] for r in evidence_records])
+    known = {m["technique"] for m in mapped}
+    for item in extra or []:
+        technique = item.get("mitre_technique")
+        if technique and technique not in known:
+            known.add(technique)
+            mapped.append({"technique": technique,
+                           "name": item.get("mitre_name") or "",
+                           "supporting_findings": [
+                               f"{item.get('process')} -> "
+                               f"{', '.join(item.get('targets') or item.get('unc_paths') or [])}"]})
+    return sorted(mapped, key=lambda t: t["technique"])

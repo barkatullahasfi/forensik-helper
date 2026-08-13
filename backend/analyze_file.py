@@ -17,7 +17,7 @@ from pathlib import Path
 from . import config as settings
 from .services import (binary_analyzer, disk_image_analyzer, hash_analyzer,
                        location_analyzer, memory_analyzer, metadata_extractor,
-                       steganography_detector, threat_feed, unpacker)
+                       mitre_mapper, steganography_detector, threat_feed, unpacker)
 from .services.timeline_builder import EvidenceLog
 
 DISK_IMAGE_EXT = {".e01", ".dd", ".raw", ".img", ".vmdk", ".001"}
@@ -159,6 +159,10 @@ def analyze(path, progress=print) -> dict:
     if category == "memory_dump":
         specific["memory"] = memory_analyzer.full_memory_triage(path, checker, evidence)
 
+    memory_result = specific.get("memory") or {}
+    mitre = mitre_mapper.map_from_evidence(
+        evidence.records, extra=memory_result.get("lolbin_execution"))
+
     gps = (metadata or {}).get("gps")
     locations = location_analyzer.build_location_timeline(
         [], [{**gps, "filename": path.name}] if gps else [])
@@ -177,6 +181,7 @@ def analyze(path, progress=print) -> dict:
         **specific,
         "locations": locations,
         "location_summary": location_analyzer.summarize(locations),
+        "mitre": mitre,
         "evidence_index": evidence.records,
     }
 
@@ -248,6 +253,17 @@ def print_report(result: dict) -> None:
                   f"{info.get('processors')} prosesor")
         print(f"    {memory['process_count']} proses, {len(memory['connections'])} koneksi "
               f"({len(memory.get('external_connections', []))} ke IP eksternal)")
+        for item in memory.get("lolbin_execution", []):
+            print(f"    [{item['confidence']:<7}] LOLBin {item['lolbin']} "
+                  f"({item['invocation']}) -> {', '.join(item['targets'] or item['unc_paths'])}")
+            print(f"             MITRE {item['mitre_technique']} ({item['mitre_name']})")
+            print(f"             proses {item['process']} PID {item['pid']} · "
+                  f"induk {item.get('parent_name') or '(tidak ada di dump)'} "
+                  f"PPID {item.get('ppid')} · user {item.get('user') or '?'}")
+            print(f"             {item['args'][:150]}")
+        for item in memory.get("remote_shares", []):
+            print(f"    [HIGH]   share jauh: {item['unc_path']}")
+            print(f"             host {item['host']} · share {item['share']}")
         for item in memory.get("persistence", []):
             print(f"    [HIGH]   persistence: {item['binary'] or item['process']} "
                   f"(PID {item['pid']}) via {item['mechanism']}")

