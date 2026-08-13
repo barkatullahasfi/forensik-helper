@@ -32,6 +32,18 @@ ANALYSIS_DIR = STORAGE / "analyses"
 FEED_DIR = STORAGE / "feeds"
 
 
+# Ekstensi tangkapan lalu lintas. Didefinisikan SEKALI di sini karena dipakai
+# tiga tempat (routing API, CLI berkas, dan penentuan kategori) -- daftar yang
+# disalin-salin adalah cara paling gampang membuat '.pcapng' dikenali di satu
+# jalur tapi tidak di jalur lain.
+PCAP_SUFFIXES = {".pcap", ".pcapng", ".cap", ".pcapng.gz", ".pcap.gz", ".ntar"}
+
+
+def is_pcap(path) -> bool:
+    name = str(path).lower()
+    return any(name.endswith(suffix) for suffix in PCAP_SUFFIXES)
+
+
 def init_storage() -> None:
     for d in (UPLOAD_DIR, ANALYSIS_DIR, FEED_DIR):
         d.mkdir(parents=True, exist_ok=True)

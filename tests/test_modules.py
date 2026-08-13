@@ -578,6 +578,21 @@ def test_unknown_packer_says_so_instead_of_guessing():
     assert "packer khusus" in result["hint"]   # arahkan, jangan diam
 
 
+def test_pcap_extensions_recognised_everywhere():
+    """
+    Daftar ekstensi yang disalin-salin adalah cara paling gampang membuat
+    '.pcapng' dikenali di satu jalur tapi tidak di jalur lain. Sebelumnya
+    `analyze_file capture.pcapng` memindai steganografi pada tangkapan
+    lalu lintas, bukan menganalisis lalu lintasnya.
+    """
+    from backend import config
+    for name in ("capture.pcapng", "CAPTURE.PCAPNG", "a.pcap", "b.cap",
+                 "c.pcapng.gz", "/mnt/c/data/evidence.pcapng"):
+        assert config.is_pcap(name), name
+    for name in ("gambar.jpg", "dump.mem", "disk.dd", "app.apk", "pcapng.txt"):
+        assert not config.is_pcap(name), name
+
+
 # ---------- Pembongkaran ----------
 
 def test_domain_filter_rejects_code_identifiers():

@@ -21,8 +21,6 @@ from .analyze_file import analyze as analyze_generic_file
 from .services import cross_evidence_correlator, threat_feed, tools
 from .services.file_carver import _force_unlink
 
-PCAP_SUFFIXES = {".pcap", ".pcapng", ".cap"}
-
 TOOL_STATUS: dict[str, bool] = {}
 
 
@@ -90,7 +88,7 @@ def _run_analysis(analysis_id: str, path: Path, target_ip: str | None) -> None:
     try:
         # Rute ditentukan ekstensi: pcap masuk pipeline jaringan, sisanya
         # (gambar/dokumen/audio/executable/disk/RAM) ke pipeline berkas.
-        if path.suffix.lower() in PCAP_SUFFIXES:
+        if settings.is_pcap(path):
             result = analyze_pcap(path, target_ip, progress=progress)
         else:
             result = analyze_generic_file(path, progress=progress)

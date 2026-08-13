@@ -112,6 +112,15 @@ def analyze(path, progress=print) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"berkas tidak ditemukan: {path}")
 
+    # Tangkapan lalu lintas diteruskan ke pipeline jaringan, bukan diperlakukan
+    # sebagai berkas biasa. Tanpa ini, `analyze_file capture.pcapng` menjalankan
+    # pemindaian steganografi pada pcap -- boros dan hasilnya tidak menjawab
+    # apa pun tentang lalu lintasnya.
+    if settings.is_pcap(path):
+        progress(f"{path.name} adalah tangkapan lalu lintas — dialihkan ke analisis pcap")
+        from .analyze import analyze_pcap
+        return analyze_pcap(path, progress=progress)
+
     evidence = EvidenceLog()
     checker = threat_feed.ThreatFeedChecker()
     checker = checker if checker.loaded else None
@@ -336,12 +345,19 @@ def main(argv=None) -> int:
                         encoding="utf-8")
         if args.json:
             print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        elif "all_sessions" in result:
+            # Hasil pcap punya bentuk berbeda; dicetak oleh pelapornya sendiri.
+            from .analyze import print_report as print_pcap_report
+            print_pcap_report(result)
         else:
             print_report(result)
         print(f"Hasil lengkap: {path}", file=sys.stderr)
 
-    if len(results) > 1:
-        pairs = hash_analyzer.compare_files([r["file_path"] for r in results])
+    # Perbandingan fuzzy hash hanya berlaku untuk berkas; hasil pcap tidak punya
+    # file_path tunggal untuk dibandingkan.
+    comparable = [r["file_path"] for r in results if r.get("file_path")]
+    if len(comparable) > 1:
+        pairs = hash_analyzer.compare_files(comparable)
         if pairs:
             print("\n  KEMIRIPAN ANTAR BERKAS")
             for pair in pairs:

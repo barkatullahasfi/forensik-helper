@@ -279,7 +279,11 @@ details.txn > summary:hover { color:var(--amber); }
 <div class="shell">
   <aside>
     <h3>Analisis baru</h3>
-    <div id="drop">Jatuhkan berkas di sini<span>pcap · gambar · exe · disk · RAM</span></div>
+    <div id="drop">Jatuhkan berkas di sini<span>pcap · pcapng · gambar · exe<br>apk · disk · RAM</span></div>
+    <!-- Tanpa atribut accept: berkas bukti sering datang tanpa ekstensi atau
+         dengan ekstensi yang dipalsukan, dan tipe sebenarnya ditentukan dari
+         isinya. Membatasi di picker akan menyembunyikan berkas yang justru
+         perlu diperiksa. -->
     <input type="file" id="file" hidden>
     <input type="text" id="ip" placeholder="target IP (opsional, khusus pcap)">
     <div class="row" style="margin-top:9px">
