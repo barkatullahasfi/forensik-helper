@@ -31,7 +31,7 @@ def _epoch(value) -> float | None:
 # Fase disusun menurut urutan yang lazim, bukan menurut waktu. Sebuah serangan
 # bisa mengulang fase (pindai ulang setelah masuk), dan urutan fase membantu
 # pembaca melihat pola meski timestamp-nya berselang-seling.
-PHASES = ["Reconnaissance", "Initial Access", "Execution",
+PHASES = ["Reconnaissance", "Initial Access", "Execution", "Defense Evasion",
           "Persistence", "Command & Control", "Data Movement"]
 
 
@@ -59,6 +59,142 @@ def build(result: dict, memory: dict | None = None,
         "data_movement": _data_movement(conversations, victim, attacker, result),
         "unresolved": _unresolved(events, memory),
     }
+
+
+def build_from_memory(memory: dict, filename: str = "") -> dict:
+    """
+    Kronologi dari RAM dump saja, tanpa pcap.
+
+    `CreateTime` tiap proses adalah stempel waktu paling presisi yang tersedia
+    di seluruh evidence -- lebih tepat daripada timestamp berkas, yang bisa
+    dipalsukan, dan lebih spesifik daripada rentang capture pcap. Mengurutkan
+    proses menurut waktu lahirnya memperlihatkan urutan eksekusi apa adanya.
+    """
+    if not memory or not memory.get("available"):
+        return {}
+    tree = {t["pid"]: t for t in memory.get("process_tree", [])}
+    flagged = _flagged_pids(memory)
+
+    events = []
+    for proc in memory.get("processes", []):
+        pid = proc.get("PID")
+        created = _epoch(proc.get("CreateTime"))
+        if created is None or pid not in flagged:
+            continue
+        node = tree.get(pid, {})
+        events.append(_event(
+            created, "Execution", node.get("user") or "?",
+            f"{proc.get('ImageFileName')} (PID {pid}) mulai berjalan",
+            target=node.get("args") or node.get("ancestry"),
+            confidence="HIGH",
+            query=f"vol -f <dump> windows.pslist --pid {pid}",
+            data=f"Induk: {node.get('parent_name') or '(tidak ada di dump)'} "
+                 f"(PPID {node.get('ppid')}). Alasan ditandai: "
+                 f"{'; '.join(flagged[pid])}"))
+
+    for item in memory.get("lolbin_execution", []):
+        node = tree.get(item.get("pid"), {})
+        events.append(_event(
+            _epoch(node.get("create_time")), "Execution", item.get("user") or "?",
+            f"{item['lolbin']} ({item['invocation']}) menjalankan "
+            f"{', '.join(item['targets'] or item['unc_paths'])}",
+            target=item["args"], confidence="HIGH",
+            query=f"vol -f <dump> windows.cmdline --pid {item['pid']}",
+            data=f"MITRE {item['mitre_technique']} ({item['mitre_name']})"))
+
+    for share in memory.get("remote_shares", []):
+        events.append(_event(
+            None, "Initial Access", share["used_by"][0]["process"] if share["used_by"] else "?",
+            f"Mengakses share jarak jauh {share['unc_path']}",
+            target=f"host {share['host']}, share {share['share']}",
+            confidence="HIGH", query="vol -f <dump> windows.cmdline",
+            data="Muatan berasal dari luar mesin ini", inferred=True))
+
+    for conn in memory.get("notable_connections", []):
+        events.append(_event(
+            None, "Command & Control", conn["process"],
+            f"Koneksi ke {conn['foreign']} [{conn['state'] or '?'}]",
+            target=conn["foreign_ip"], confidence=conn["confidence"],
+            query=conn["evidence_query"], data="; ".join(conn["reasons"])))
+
+    for item in memory.get("persistence", []):
+        node = tree.get(item.get("pid"), {})
+        events.append(_event(
+            _epoch(node.get("create_time")), "Persistence",
+            node.get("user") or item.get("process"),
+            f"{item['binary'] or item['process']} terpasang lewat {item['mechanism']}",
+            target=item["path"], confidence="HIGH",
+            query=f"vol -f <dump> windows.cmdline --pid {item['pid']}",
+            data="Waktu PEMASANGAN tidak terlihat di RAM; yang tercatat hanya waktu "
+                 "proses ini mulai berjalan. Untuk waktu pemasangan perlu disk image",
+            inferred=True))
+
+    for item in memory.get("process_hollowing", []):
+        node = tree.get(item.get("pid"), {})
+        events.append(_event(
+            _epoch(node.get("create_time")), "Defense Evasion", item.get("user") or "?",
+            f"{item['process_name']} melaporkan diri berbeda dari berkas yang "
+            f"dijalankannya ({item['commandline_binary']})",
+            target=item["args"], confidence="HIGH",
+            query=f"vol -f <dump> windows.cmdline --pid {item['pid']}",
+            data="Masquerading / process hollowing"))
+
+    for entry in memory.get("code_injection_by_process", []):
+        if entry.get("known_false_positive"):
+            continue
+        node = tree.get(entry.get("pid"), {})
+        events.append(_event(
+            _epoch(node.get("create_time")), "Defense Evasion", node.get("user") or "?",
+            f"{entry['process']} punya {entry['region_count']} region memori "
+            "executable+writable",
+            target=f"PID {entry['pid']}", confidence="MEDIUM",
+            query=f"vol -f <dump> windows.malfind --pid {entry['pid']}",
+            data="Region RWX tanpa berkas pendukung di disk"))
+
+    events.sort(key=sort_key)
+    # Akun diambil dari windows.getsids, BUKAN dari kolom pelaku: sebagian event
+    # berpelaku proses (koneksi jaringan, akses share) dan mencampurnya membuat
+    # 'net.exe' dan 'svchost.exe' tampil sebagai nama pengguna.
+    accounts = sorted({u for u in (memory.get("users") or {}).values() if u})
+    return {
+        "source": filename or "RAM dump",
+        "victim": None, "attacker": None,
+        "events": events,
+        "phases": {phase: [e for e in events if e["phase"] == phase] for phase in PHASES},
+        "accounts_involved": accounts,
+        "data_movement": {"peers": [], "verdict": None},
+        "unresolved": [
+            "Waktu proses lahir berasal dari RAM; proses yang sudah keluar sebelum "
+            "dump diambil tidak muncul sama sekali",
+            "Tanpa pcap, isi lalu lintas ke server jarak jauh tidak bisa diperiksa",
+            "Tanpa disk image, waktu berkas pertama kali sampai di sistem tidak "
+            "bisa dipastikan",
+        ],
+    }
+
+
+def _flagged_pids(memory: dict) -> dict:
+    """PID yang ditandai modul mana pun, beserta alasannya."""
+    flagged: dict[int, list[str]] = {}
+    def add(pid, reason):
+        if pid is not None:
+            flagged.setdefault(pid, []).append(reason)
+
+    for item in memory.get("lolbin_execution", []):
+        add(item.get("pid"), f"eksekusi {item['lolbin']}")
+    for item in memory.get("suspicious_command_lines", []):
+        add(item.get("pid"), "; ".join(item.get("reasons", [])))
+    for item in memory.get("process_hollowing", []):
+        add(item.get("pid"), "process hollowing")
+    for item in memory.get("persistence", []):
+        add(item.get("pid"), f"persistence: {item['mechanism']}")
+    for entry in memory.get("code_injection_by_process", []):
+        if not entry.get("known_false_positive"):
+            add(entry.get("pid"), f"malfind {entry['region_count']} region RWX")
+    for conn in memory.get("notable_connections", []):
+        if conn["confidence"] == "HIGH":
+            add(conn.get("pid"), f"koneksi ke {conn['foreign']}")
+    return flagged
 
 
 def _identify_attacker(result: dict) -> str | None:

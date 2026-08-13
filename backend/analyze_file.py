@@ -15,9 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config as settings
-from .services import (binary_analyzer, disk_image_analyzer, hash_analyzer,
-                       location_analyzer, memory_analyzer, metadata_extractor,
-                       mitre_mapper, steganography_detector, threat_feed, unpacker)
+from .services import (attack_timeline, binary_analyzer, disk_image_analyzer,
+                       hash_analyzer, location_analyzer, memory_analyzer,
+                       metadata_extractor, mitre_mapper, steganography_detector,
+                       threat_feed, unpacker)
 from .services.timeline_builder import EvidenceLog
 
 DISK_IMAGE_EXT = {".e01", ".dd", ".raw", ".img", ".vmdk", ".001"}
@@ -162,6 +163,7 @@ def analyze(path, progress=print) -> dict:
     memory_result = specific.get("memory") or {}
     mitre = mitre_mapper.map_from_evidence(
         evidence.records, extra=memory_result.get("lolbin_execution"))
+    timeline = attack_timeline.build_from_memory(memory_result, path.name)
 
     gps = (metadata or {}).get("gps")
     locations = location_analyzer.build_location_timeline(
@@ -182,6 +184,7 @@ def analyze(path, progress=print) -> dict:
         "locations": locations,
         "location_summary": location_analyzer.summarize(locations),
         "mitre": mitre,
+        "attack_timeline": timeline,
         "evidence_index": evidence.records,
     }
 
@@ -244,15 +247,42 @@ def print_report(result: dict) -> None:
 
     memory = result.get("memory") or {}
     if memory.get("available"):
-        print("\n  RAM DUMP")
+        print("\n" + "=" * 72)
+        print("  RAM DUMP")
+        print("=" * 72)
         info = memory.get("system_info") or {}
         if info.get("kernel_base"):
             print(f"    kernel base : {info['kernel_base']}   DTB {info.get('dtb')}")
             print(f"    build       : {info.get('build')}  "
                   f"{'64-bit' if info.get('is_64bit') else '32-bit'}, "
                   f"{info.get('processors')} prosesor")
-        print(f"    {memory['process_count']} proses, {len(memory['connections'])} koneksi "
-              f"({len(memory.get('external_connections', []))} ke IP eksternal)")
+            if info.get("system_time"):
+                print(f"    waktu dump  : {info['system_time']}")
+        users = memory.get("users") or {}
+        print(f"    {memory['process_count']} proses, {len(memory['connections'])} koneksi, "
+              f"{len(set(users.values()))} akun pengguna: "
+              f"{', '.join(sorted(set(users.values()))[:6]) or '-'}")
+
+        # Rantai induk proses yang ditandai. "PPID 4120" tidak menjelaskan apa
+        # pun sendirian; yang menjelaskan alur serangan adalah rantainya.
+        flagged = {i["pid"] for i in memory.get("lolbin_execution", [])}
+        flagged |= {i["pid"] for i in memory.get("process_hollowing", [])}
+        flagged |= {i["pid"] for i in memory.get("persistence", [])}
+        branch = [t for t in memory.get("process_tree", []) if t["pid"] in flagged]
+        if branch:
+            print("\n    POHON PROSES YANG DITANDAI")
+            for node in branch:
+                print(f"      {node['name']} (PID {node['pid']})  user={node['user'] or '?'}")
+                print(f"        induk    : {node['ancestry']}")
+                if not node["parent_exists"]:
+                    print(f"        !! induk PPID {node['ppid']} TIDAK ADA di dump — "
+                          "proses induk sudah keluar sebelum dump diambil")
+                if node.get("create_time"):
+                    print(f"        dibuat   : {node['create_time']}")
+                if node.get("args"):
+                    for line in _wrap(str(node["args"]), 58):
+                        print(f"        cmdline  : {line}")
+            print()
         for item in memory.get("lolbin_execution", []):
             print(f"    [{item['confidence']:<7}] LOLBin {item['lolbin']} "
                   f"({item['invocation']}) -> {', '.join(item['targets'] or item['unc_paths'])}")
@@ -328,15 +358,74 @@ def print_report(result: dict) -> None:
         if unpacked.get("hint"):
             print(f"    {unpacked['hint']}")
 
+    _print_attack_timeline(result.get("attack_timeline") or {})
+    _print_mitre(result.get("mitre") or [])
+
     print("\n" + "=" * 72)
-    print(f"  APPENDIX ({len(result['evidence_index'])} temuan)")
+    print(f"  APPENDIX REPRODUKSIBILITAS ({len(result['evidence_index'])} temuan)")
     print("=" * 72)
-    for record in result["evidence_index"]:
-        print(f"  {record['finding_type']}: {record['result']}")
-        print(f"    perintah: {record['wireshark_filter']}")
+    for i, record in enumerate(result["evidence_index"], 1):
+        print(f"\n  {i}. {record['finding_type']} — {record['result']}")
+        print(f"     perintah: {record['wireshark_filter']}")
         if record["note"]:
-            print(f"    catatan : {record['note']}")
+            for line in _wrap(record["note"], 66):
+                print(f"     catatan : {line}" if line == _wrap(record["note"], 66)[0]
+                      else f"               {line}")
     print()
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    import textwrap
+    return textwrap.wrap(text, width) or [""]
+
+
+def _print_attack_timeline(timeline: dict) -> None:
+    events = timeline.get("events") or []
+    if not events:
+        return
+    print("\n" + "=" * 72)
+    print("  KRONOLOGI SERANGAN")
+    print("=" * 72)
+    if timeline.get("accounts_involved"):
+        print(f"  Akun terlibat: {', '.join(timeline['accounts_involved'])}")
+
+    for phase, phase_events in timeline["phases"].items():
+        if not phase_events:
+            continue
+        print(f"\n  --- {phase} ({len(phase_events)}) ---")
+        for e in phase_events:
+            when = e["time_utc"] or "(waktu tidak tercatat)"
+            mark = "  [inferensi]" if e["is_inference"] else ""
+            print(f"\n  {when}  [{e['confidence']}]{mark}")
+            print(f"     {e['actor']}: {e['action']}")
+            # Panah hanya di baris pertama: mengulangnya di baris lanjutan
+            # membuat rantai induk 'A <- B <- C' terbaca seolah ada panah baru.
+            if e.get("target"):
+                for i, line in enumerate(_wrap(str(e["target"]), 62)):
+                    print(f"       {'->' if i == 0 else '  '} {line}")
+            if e.get("data"):
+                for line in _wrap(str(e["data"]), 62):
+                    print(f"          {line}")
+            if e.get("evidence_query"):
+                print(f"       perintah: {e['evidence_query']}")
+
+    if timeline.get("unresolved"):
+        print("\n  --- Belum terjawab dari evidence ini ---")
+        for gap in timeline["unresolved"]:
+            for i, line in enumerate(_wrap(gap, 66)):
+                print(f"  {'·' if i == 0 else ' '} {line}")
+
+
+def _print_mitre(mitre: list) -> None:
+    if not mitre:
+        return
+    print("\n" + "=" * 72)
+    print(f"  MITRE ATT&CK ({len(mitre)} teknik)")
+    print("=" * 72)
+    for item in mitre:
+        print(f"  {item['technique']:<12} {item['name']}")
+        for finding in item["supporting_findings"][:3]:
+            print(f"               <- {finding}")
 
 
 def main(argv=None) -> int:
