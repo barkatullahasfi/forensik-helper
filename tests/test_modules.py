@@ -1005,6 +1005,70 @@ def test_capinfos_float_survives_comma_decimal_locale():
     assert _int("51181") == 51181 and _int("51,181") == 51181
 
 
+# ---------- Steganografi ----------
+
+def _jpeg(payload: bytes, with_eoi: bool = True) -> Path:
+    """JPEG minimal yang sah strukturnya, dengan atau tanpa penanda akhir."""
+    body = (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00"
+            + b"\xff\xda\x00\x08\x01\x01\x00\x01?\x10")
+    tmp = Path(tempfile.mkdtemp()) / "s.jpg"
+    tmp.write_bytes(body + payload + (b"\xff\xd9" if with_eoi else b""))
+    return tmp
+
+
+def test_stego_missing_end_marker_is_a_finding():
+    """
+    Berkas yang penanda akhirnya dibuang membuat pemeriksaan trailing data
+    kehilangan titik ukur, dan versi lama menjawabnya dengan DIAM -- hasil yang
+    sama persis dengan berkas bersih. Padahal tiap JPEG sah berakhir di FFD9.
+    """
+    result = steganography_detector.check_trailing_data(
+        _jpeg(b"\n\nThis is a hidden string at the EOF.\n", with_eoi=False))
+    assert result is not None, "JPEG tanpa FFD9 dilaporkan bersih"
+    assert result["marker_missing"] is True
+    assert "hidden string" in result["preview_ascii"]
+
+
+def test_stego_trailing_data_after_marker_still_detected():
+    # EOI ditaruh di dalam payload: yang dicari adalah data SESUDAHNYA.
+    result = steganography_detector.check_trailing_data(
+        _jpeg(b"\xff\xd9" + b"RAHASIA" * 8, with_eoi=False))
+    assert result and result["marker_missing"] is False
+    assert result["trailing_bytes"] == 56
+
+
+def test_stego_clean_jpeg_reports_nothing():
+    assert steganography_detector.check_trailing_data(_jpeg(b"\x00" * 32)) is None
+
+
+def test_stego_readable_text_found_without_any_keyword():
+    """
+    Daftar kata kunci tidak akan pernah cukup. "This is a hidden string at the
+    EOF" tidak memuat 'flag', 'secret', maupun 'password' -- dan lolos
+    sepenuhnya dari penyaring berbasis kata. Yang menangkapnya adalah aturan
+    umumnya: data terkompresi tidak menghasilkan kalimat.
+    """
+    message = b"This is a hidden string at the EOF. Great job finding it!"
+    path = _jpeg(b"\n\n" + message + b"\n")
+    assert steganography_detector._interesting_strings(path) == []   # kata kunci gagal
+    found = steganography_detector.readable_text(path)
+    assert found and message.decode() in found[0]["text"]
+
+
+def test_stego_xmp_metadata_not_reported_as_hidden_text():
+    """Tiap JPEG hasil Adobe memuat blok XMP panjang -- kalau ikut dilaporkan,
+    temuan asli tenggelam di antara belasan baris namespace."""
+    xmp = (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+           b'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF></x:xmpmeta>')
+    assert steganography_detector.readable_text(_jpeg(xmp)) == []
+
+
+def test_stego_base64_blob_not_mistaken_for_sentence():
+    """Deretan base64 panjang bukan kalimat: rasio hurufnya tinggi tapi tanpa spasi."""
+    blob = b"YjRzMWNfYjRzNjRfM25jMGQxbmdfZjByX3RtYjRzMWNfYjRzNjRfM25jMGQxbmc="
+    assert steganography_detector.readable_text(_jpeg(blob)) == []
+
+
 # ---------- Analisis log ----------
 
 def _log(text: str, name: str = "access.log"):

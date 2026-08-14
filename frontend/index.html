@@ -526,6 +526,7 @@ function render(r) {
   out.push(findings(r));
   out.push(attackTimelineSection(r));
   out.push(logSection(r));
+  out.push(stegoSection(r));
   out.push(memorySection(r));
   out.push(binarySection(r));
   out.push(reverseSection(r));
@@ -636,6 +637,19 @@ function alertBanner(r) {
   if (log.available && log.summary.parse_rate < 0.5) parts.push(`<strong>hanya ${
     (log.summary.parse_rate * 100).toFixed(0)}% baris log terbaca</strong> — hasil di
     bawah tidak meliputi seluruh berkas`);
+
+  const stego = r.steganography || {};
+  const hidden = stego.readable_text || [];
+  if (hidden.length) parts.push(`<strong>teks tersembunyi di dalam berkas media</strong>
+    (offset ${esc(hidden[0].offset_hex)}): "${esc(hidden[0].text.slice(0, 70))}"`);
+  if ((stego.trailing_data || {}).marker_missing) parts.push(`<strong>penanda akhir
+    ${esc(stego.trailing_data.marker)} tidak ada</strong> — berkas terpotong atau diubah`);
+  else if (stego.trailing_data) parts.push(`<strong>${
+    stego.trailing_data.trailing_bytes.toLocaleString()} byte setelah
+    ${esc(stego.trailing_data.marker)}</strong>`);
+  const embedded = (stego.embedded_signatures || []).filter(x => !x.skipped);
+  if (embedded.length) parts.push(`<strong>${embedded.length} berkas tersisip</strong>
+    (${esc([...new Set(embedded.map(x => x.type))].join(", "))})`);
 
   // Sama seperti temuan RAM: berkas ter-pack dengan muatan tersembunyi harus
   // muncul di judul. Tanpa ini, sampel UPX berisi skrip AutoIt 219 KB tetap
@@ -1049,6 +1063,72 @@ function logSection(r) {
 
   return section("Log server", blocks.length || null,
     `<div class="panel">${head}</div>${blocks.join("")}${transfers}${sources}`);
+}
+
+// Steganografi. Teks terbaca ditaruh PALING ATAS: itu yang paling sering jadi
+// jawabannya, dan yang paling gampang tenggelam kalau ditaruh di bawah tabel.
+function stegoSection(r) {
+  const s = r.steganography || {};
+  const sigs = (s.embedded_signatures || []).filter(x => !x.skipped);
+  const text = s.readable_text || [];
+  const trailing = s.trailing_data;
+  const strings = s.interesting_strings || [];
+  const steghide = s.steghide || {};
+  if (!sigs.length && !text.length && !trailing && !strings.length
+      && !steghide.success) return "";
+
+  const blocks = [];
+
+  text.forEach(item => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(item.has_keyword ? "HIGH" : "MEDIUM")}
+      <span class="finding-cat">Teks terbaca di dalam berkas media</span>
+      <span class="finding-time">offset ${esc(item.offset_hex)}</span></div>
+    <div class="finding-body">
+      <pre class="txn-pre resp">${esc(item.text)}</pre>
+      <div class="footnote">${esc(item.note)}</div>
+      ${filter(`strings ${esc(r.filename || "")}`)}</div></div>`));
+
+  if (trailing) blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(trailing.marker_missing ? "HIGH" : "MEDIUM")}
+      <span class="finding-cat">${trailing.marker_missing
+        ? `Penanda akhir ${esc(trailing.marker)} TIDAK ADA`
+        : `${trailing.trailing_bytes.toLocaleString()} byte setelah ${esc(trailing.marker)}`}</span>
+      </div>
+    <div class="finding-body">
+      <div style="font-size:12.5px">${esc(trailing.note)}</div>
+      <div class="txn-label" style="margin-top:8px">ekor berkas (ascii)</div>
+      <pre class="txn-pre">${esc(trailing.preview_ascii)}</pre>
+      <div class="txn-label" style="margin-top:8px">hex</div>
+      <pre class="txn-pre">${esc(trailing.preview)}</pre></div></div>`);
+
+  if (steghide.success) blocks.push(`<div class="finding">
+    <div class="finding-head">${sev("HIGH")}
+      <span class="finding-cat">steghide berhasil mengekstrak</span></div>
+    <div class="finding-body">${kv([
+      ["Password", esc(steghide.password_used)],
+      ["Tersimpan di", esc(steghide.extracted_to)],
+    ])}</div></div>`);
+
+  const sigPanel = sigs.length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Signature berkas lain yang tersisip</div>
+    ${sigs.map(x => `<div class="kv-row"><span class="k">${esc(x.type)}</span>
+      <span class="v mono">${esc(x.offset_hex)}${x.validated
+        ? " — struktur header terverifikasi" : ""}</span></div>`).join("")}</div>` : "";
+
+  const stringPanel = strings.length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">String dengan kata kunci</div>
+    <pre class="txn-pre">${esc(strings.join("\n"))}</pre></div>` : "";
+
+  const skipped = [(s.steghide || {}).skipped, (s.zsteg || [])[0]?.skipped,
+                   (s.binwalk || [])[0]?.skipped].filter(Boolean);
+  // Alat yang TIDAK jalan disebut. Tanpa ini, "tidak ada temuan" bisa berarti
+  // "pemeriksaannya memang tidak pernah dijalankan".
+  const skipPanel = skipped.length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Pemeriksaan yang dilewati</div>
+    ${skipped.map(x => `<div class="footnote">${esc(x)}</div>`).join("")}</div>` : "";
+
+  return section("Steganografi", blocks.length || null,
+    blocks.join("") + sigPanel + stringPanel + skipPanel);
 }
 
 // Analisis binary: header PE, packer, runtime, kapabilitas, dan IOC.

@@ -255,13 +255,23 @@ def print_report(result: dict) -> None:
         print(f"    [!] {flag}")
 
     stego = result.get("steganography") or {}
-    if stego.get("embedded_signatures") or stego.get("trailing_data"):
+    if (stego.get("embedded_signatures") or stego.get("trailing_data")
+            or stego.get("readable_text")):
         print("\n  STEGANOGRAFI")
         for item in stego.get("embedded_signatures", [])[:10]:
             print(f"    {item['type']} @ {item['offset_hex']}")
-        if stego.get("trailing_data"):
-            t = stego["trailing_data"]
-            print(f"    {t['trailing_bytes']} byte setelah {t['marker']}: {t['preview_ascii'][:60]}")
+        t = stego.get("trailing_data")
+        if t and t["marker_missing"]:
+            print(f"    [!] penanda akhir {t['marker']} TIDAK ADA — berkas terpotong "
+                  "atau sengaja diubah")
+            print(f"        ekor berkas: {t['preview_ascii'][:70]}")
+        elif t:
+            print(f"    {t['trailing_bytes']} byte setelah {t['marker']}: "
+                  f"{t['preview_ascii'][:60]}")
+        # Dicetak sebelum interesting_strings: inilah yang menemukan pesan yang
+        # tidak memuat kata kunci apa pun.
+        for item in stego.get("readable_text", [])[:10]:
+            print(f"    teks @ {item['offset_hex']}: {item['text'][:110]}")
         for s in stego.get("interesting_strings", [])[:10]:
             print(f"    string: {s[:100]}")
 

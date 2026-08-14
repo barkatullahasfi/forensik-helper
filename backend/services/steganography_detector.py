@@ -108,25 +108,51 @@ def scan_embedded_signatures(file_path, limit: int = 40) -> list[dict]:
     return sorted(findings, key=lambda f: f["offset"])
 
 
+# Penanda akhir yang WAJIB ada di tiap format. Kuncinya signature awal berkas,
+# supaya ketiadaan penanda bisa dibedakan dari "format ini memang tidak punya".
+END_MARKERS = {
+    b"\xff\xd8\xff": (b"\xff\xd9", "JPEG EOI"),
+    b"\x89PNG\r\n\x1a\n": (b"IEND\xaeB`\x82", "PNG IEND"),
+    b"GIF8": (b"\x00\x3b", "GIF trailer"),
+}
+
+
 def check_trailing_data(file_path) -> dict | None:
     """
     Data setelah penanda akhir berkas. Tempat persembunyian paling klasik:
     viewer gambar berhenti di EOF, sisanya tidak pernah terlihat.
+
+    Penanda yang HILANG sama pentingnya dengan data setelahnya. Berkas yang
+    penanda akhirnya dibuang membuat pemeriksaan ini kehilangan titik ukur, dan
+    versi lama modul ini menjawabnya dengan diam -- persis hasil yang sama
+    dengan berkas yang memang bersih. Padahal tiap JPEG sah berakhir di FFD9:
+    ketiadaannya sendiri sudah temuan.
     """
     data = _read_scannable(file_path)
     if data is None:
         return None
-    markers = {b"\xff\xd9": "JPEG EOI", b"IEND\xaeB`\x82": "PNG IEND"}
-    for marker, name in markers.items():
+    for signature, (marker, name) in END_MARKERS.items():
+        if not data.startswith(signature):
+            continue
         index = data.rfind(marker)
-        if index != -1:
-            end = index + len(marker)
-            if len(data) > end + 8:
-                return {"marker": name, "trailing_bytes": len(data) - end,
-                        "preview": data[end:end + 64].hex(),
-                        "preview_ascii": _printable(data[end:end + 64]),
-                        "note": f"Ada {len(data) - end} byte setelah {name} -- "
-                                "data setelah akhir berkas resmi"}
+        if index == -1:
+            tail = data[-96:]
+            return {"marker": name, "marker_missing": True,
+                    "trailing_bytes": None,
+                    "preview": tail.hex(), "preview_ascii": _printable(tail),
+                    "note": f"Penanda akhir {name} TIDAK ADA sama sekali. Berkas ini "
+                            "terpotong atau sengaja diubah -- dan ekor berkasnya "
+                            "adalah tempat pertama yang harus diperiksa. Isi 96 byte "
+                            "terakhir ditampilkan di preview."}
+        end = index + len(marker)
+        if len(data) > end + 8:
+            return {"marker": name, "marker_missing": False,
+                    "trailing_bytes": len(data) - end,
+                    "preview": data[end:end + 64].hex(),
+                    "preview_ascii": _printable(data[end:end + 64]),
+                    "note": f"Ada {len(data) - end} byte setelah {name} -- "
+                            "data setelah akhir berkas resmi"}
+        return None
     return None
 
 
@@ -173,6 +199,61 @@ def _interesting_strings(file_path, limit: int = 20) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+# Kosakata yang memang tinggal di metadata gambar. Bukan untuk membuang temuan
+# sembarangan -- hanya yang benar-benar selalu ada di berkas media normal.
+BORING_TEXT_HINTS = BORING_URL_HINTS + (
+    "xmpmeta", "xpacket", "rdf:", "dc:title", "photoshop:", "xmp:", "tiff:",
+    "exif:", "crs:", "stEvt:", "stRef:", "Adobe", "JFIF", "Exif", "Ducky",
+    "ICC Profile", "IEC 61966", "Copyright (c)", "Windows Photo", "Picasa",
+    "Created with", "GIMP", "ImageMagick", "Lightroom", "CREATOR:",
+)
+
+# Panjang minimum sebuah kalimat. Di bawah ini, nama field metadata dan potongan
+# tabel Huffman yang kebetulan terbaca ikut terjaring.
+MIN_READABLE_RUN = 24
+
+
+def readable_text(file_path, min_length: int = MIN_READABLE_RUN,
+                  limit: int = 20) -> list[dict]:
+    """
+    Kalimat terbaca di dalam berkas yang isinya terkompresi.
+
+    Ini aturan umumnya, dan pencocokan kata kunci hanyalah pelengkapnya. Data
+    JPEG/PNG/audio yang sudah dikompresi tidak menghasilkan kalimat: satu
+    kalimat utuh di dalamnya berarti seseorang menaruhnya di sana. Aturan ini
+    berlaku TANPA perlu menebak kata kuncinya lebih dulu.
+
+    Daftar kata kunci sendiri tidak akan pernah cukup. Pesan
+    "This is a hidden string at the EOF" tidak memuat 'flag', 'secret', maupun
+    'password' -- dan karena itu lolos sepenuhnya dari penyaring berbasis kata.
+    """
+    data = _read_scannable(file_path)
+    if data is None:
+        return []
+    results = []
+    for match in re.finditer(rb"[\x20-\x7e]{%d,}" % min_length, data):
+        text = match.group().decode("ascii")
+        if any(hint.lower() in text.lower() for hint in BORING_TEXT_HINTS):
+            continue
+        # Rasio huruf: memisahkan kalimat dari deretan simbol atau base64 yang
+        # kebetulan panjang. Kalimat manusia didominasi huruf dan spasi.
+        letters = sum(1 for c in text if c.isalpha() or c.isspace())
+        ratio = letters / len(text)
+        if ratio < 0.6 or " " not in text.strip():
+            continue
+        lowered = text.lower()
+        results.append({
+            "offset": match.start(), "offset_hex": hex(match.start()),
+            "text": text[:300], "letter_ratio": round(ratio, 2),
+            "has_keyword": any(k in lowered for k in INTERESTING_KEYWORDS),
+            "note": "Teks terbaca di dalam data terkompresi. Berkas gambar/audio "
+                    "tidak menghasilkan kalimat dengan sendirinya.",
+        })
+        if len(results) >= limit:
+            break
+    return sorted(results, key=lambda r: (not r["has_keyword"], -len(r["text"])))
 
 
 def run_binwalk_scan(file_path) -> list[dict]:
@@ -237,6 +318,7 @@ def full_scan(file_path, file_type: str = "", output_dir=None,
         "zsteg": None,
         "steghide": None,
         "interesting_strings": _interesting_strings(path),
+        "readable_text": readable_text(path),
     }
     if "png" in file_type or "bmp" in file_type:
         result["zsteg"] = run_zsteg_scan(path)
@@ -246,10 +328,20 @@ def full_scan(file_path, file_type: str = "", output_dir=None,
     for item in result["embedded_signatures"]:
         evidence.track("embedded_file", f"binwalk {path.name}", item["type"],
                        note=item["note"])
-    if result["trailing_data"]:
-        evidence.track("trailing_data", f"tail -c +N {path.name}",
-                       f"{result['trailing_data']['trailing_bytes']} byte",
-                       note=result["trailing_data"]["note"])
+    trailing = result["trailing_data"]
+    if trailing:
+        evidence.track(
+            "missing_end_marker" if trailing["marker_missing"] else "trailing_data",
+            f"xxd {path.name} | tail",
+            (f"{trailing['marker']} tidak ada" if trailing["marker_missing"]
+             else f"{trailing['trailing_bytes']} byte"),
+            note=trailing["note"] + f" Ekor berkas: {trailing['preview_ascii']}")
+    for item in result["readable_text"]:
+        evidence.track("readable_text_in_media", f"strings {path.name}",
+                       item["text"][:120],
+                       note=f"Offset {item['offset_hex']}. {item['note']}"
+                            + (" Memuat kata kunci yang lazim dipakai di soal."
+                               if item["has_keyword"] else ""))
     if result["steghide"] and result["steghide"].get("success"):
         evidence.track("steghide_extracted",
                        f"steghide extract -sf {path.name} -p '{result['steghide']['password_used']}'",

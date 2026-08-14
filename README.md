@@ -307,7 +307,7 @@ Dokumentasi otomatis di `/docs`. Endpoint utama:
 | `owasp_detector` | SQLi/XSS/command injection/traversal/SSRF + outcome |
 | `hash_analyzer` | MD5/SHA1/SHA256 + fuzzy hash + perbandingan berkas |
 | `metadata_extractor` | EXIF, GPS, authorship, anomali timestamp |
-| `steganography_detector` | Signature tersisip (tervalidasi), trailing data, LSB, steghide |
+| `steganography_detector` | Signature tersisip (tervalidasi), trailing data, penanda akhir hilang, teks terbaca di dalam data terkompresi, LSB, steghide |
 | `binary_analyzer` | Strings ASCII+UTF-16, IOC, header PE, packer, runtime, kapabilitas |
 | `reverse_engineer` | Overlay PE, resource tersembunyi, string base64/XOR, disassembly entry point, imphash |
 | `unpacker` | Bongkar UPX dan arsip/APK, lalu analisis ulang isinya |
@@ -364,6 +364,11 @@ memahami batasannya adalah cara tercepat menghasilkan kesimpulan yang salah.
   tidak dimasukkan ke narasi.
 - **Deteksi OWASP signature-based** — rawan false positive; verifikasi isi request
   lengkapnya sebelum menyimpulkan.
+- **Teks terbaca di dalam berkas media dilaporkan tanpa perlu kata kunci.** Data
+  gambar/audio yang sudah dikompresi tidak menghasilkan kalimat, jadi kalimat
+  utuh di dalamnya berarti seseorang menaruhnya di sana. Daftar kata kunci saja
+  tidak akan pernah cukup — pesan yang tidak memuat 'flag' atau 'secret' lolos
+  sepenuhnya dari penyaring berbasis kata.
 - **Log akses hanya memuat baris request, bukan isi response.** Apakah payload
   benar-benar dieksekusi tidak bisa dipastikan dari log web — status 200 berarti
   server menjawab, bukan berarti serangannya berhasil. Pastikan dari log
