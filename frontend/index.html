@@ -525,6 +525,7 @@ function render(r) {
   out.push(owaspCategories(r));
   out.push(findings(r));
   out.push(attackTimelineSection(r));
+  out.push(logSection(r));
   out.push(memorySection(r));
   out.push(binarySection(r));
   out.push(reverseSection(r));
@@ -611,6 +612,31 @@ function alertBanner(r) {
   if (persist.length) parts.push(`<strong>${persist.length} mekanisme persistence</strong>`);
   const injected = (m.code_injection_by_process || []).filter(i => !i.known_false_positive);
   if (injected.length) parts.push(`<strong>${injected.length} proses dengan memori RWX</strong>`);
+  const log = r.log || {};
+  const breached = (log.brute_force || []).filter(b => b.compromised);
+  if (breached.length) parts.push(`<strong>login paksa BERHASIL</strong> dari
+    ${esc(breached.map(b => b.src_ip).join(", "))} sebagai
+    ${esc(breached.flatMap(b => b.compromised_accounts).join(", ") || "(user tidak tercatat)")}`);
+  else if ((log.brute_force || []).length) parts.push(`<strong>${
+    log.brute_force.reduce((n, b) => n + b.failures, 0)} kegagalan autentikasi</strong>
+    dari ${esc(log.brute_force.map(b => b.src_ip).join(", "))}`);
+  const shells = (log.webshells || []).filter(w => w.server_answered);
+  if (shells.length) parts.push(`<strong>${shells.length} kandidat webshell</strong>
+    yang dijawab server (${esc(shells.map(w => w.uri).join(", "))})`);
+  const sudo = (log.privilege_use || []).filter(p => p.confidence === "HIGH");
+  if (sudo.length) parts.push(`<strong>${sudo.length} perintah sudo</strong> setelah kompromi`);
+  const enc = (log.encoded_parameters || []).filter(e => e.confidence !== "LOW");
+  if (enc.length) parts.push(`<strong>${enc.length} parameter ter-encode</strong> yang
+    terdekode jadi teks terbaca (${esc([...new Set(enc.map(e => e.parameter))].join(", "))})`);
+  const logAttacks = (log.attack_summary || {}).total;
+  if (logAttacks) parts.push(`<strong>${logAttacks} request serangan web</strong> di log
+    dari ${esc((log.attack_summary.attackers || []).join(", "))}`);
+  // Berkas yang mayoritas barisnya gagal dibaca WAJIB muncul di judul. Tanpa ini,
+  // "tidak ada indikator menonjol" bisa berarti "kami tidak bisa membaca log-nya".
+  if (log.available && log.summary.parse_rate < 0.5) parts.push(`<strong>hanya ${
+    (log.summary.parse_rate * 100).toFixed(0)}% baris log terbaca</strong> — hasil di
+    bawah tidak meliputi seluruh berkas`);
+
   // Sama seperti temuan RAM: berkas ter-pack dengan muatan tersembunyi harus
   // muncul di judul. Tanpa ini, sampel UPX berisi skrip AutoIt 219 KB tetap
   // dilabeli "tidak ada indikator menonjol".
@@ -867,6 +893,162 @@ function memorySection(r) {
       <div class="summary-label">Informasi sistem</div>${sysRows}</div>` : "") +
     rows.join("") +
     (inject ? `<div class="panel"><div class="summary-label">malfind — region executable + writable</div>${inject}</div>` : ""));
+}
+
+// Analisis log server. Angka keterbacaan ditaruh di ATAS temuan: "0 temuan" dari
+// log yang formatnya tidak dikenali terlihat persis sama dengan "0 temuan" dari
+// log yang memang bersih, dan pembaca harus tahu itu sebelum menyimpulkan.
+function logSection(r) {
+  const log = r.log || {};
+  if (!log.available) return "";
+  const s = log.summary;
+
+  const warn = [];
+  if (s.parse_rate < 0.5) warn.push(`${s.lines_unparsed.toLocaleString()} baris TIDAK
+    terbaca — temuan di bawah tidak meliputi seluruh berkas`);
+  if (s.truncated) warn.push(`berkas dipotong di ${s.lines_total.toLocaleString()} baris`);
+  if (s.assumed_year) warn.push(`syslog tidak memuat tahun — ${s.assumed_year}
+    diasumsikan dari waktu modifikasi berkas`);
+
+  // Statistik web hanya untuk log yang memang memuat request. Di auth.log
+  // semuanya nol, dan "error rate 0.0%" terbaca seolah tidak ada error —
+  // padahal artinya pertanyaannya tidak berlaku untuk berkas ini.
+  const head = cells([
+    ["format", s.format],
+    ["baris terbaca", `${s.lines_parsed.toLocaleString()} / ${s.lines_total.toLocaleString()}`,
+      s.parse_rate < 0.5],
+    ["keterbacaan", (s.parse_rate * 100).toFixed(1) + "%", s.parse_rate < 0.5],
+    ["sumber unik", s.unique_sources],
+    ["rentang", `${s.first_event || "?"} — ${s.last_event || "?"}`],
+    ...(s.web_entries ? [
+      ["request web", s.web_entries.toLocaleString()],
+      ["path unik", s.unique_paths],
+      ["error rate", (s.error_rate * 100).toFixed(1) + "%", s.error_rate > 0.5],
+      ["byte dilayani", s.bytes_served.toLocaleString()],
+    ] : []),
+  ]) + (warn.length ? warn.map(w => `<div class="fp-note">
+    <span class="fp-dot" style="background:var(--amber)"></span>${w}</div>`).join("") : "")
+    + (s.web_entries ? `<div class="kv-row"><span class="k">status</span><span class="v mono">${
+      Object.entries(s.by_status).map(([code, n]) =>
+        `<span class="outcome-tag ${statusClass(code)}">${esc(code)} × ${n}</span>`).join(" ")
+    }</span></div>` : "");
+
+  const blocks = [];
+
+  (log.brute_force || []).forEach(b => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(b.confidence)}
+      <span class="finding-cat">Brute force dari ${esc(b.src_ip)}</span>
+      <span class="finding-time">${esc(b.first_attempt)}</span></div>
+    <div class="finding-body">${kv([
+      ["Kegagalan", `${b.failures}${b.attempts_per_min ? ` (${b.attempts_per_min}/menit)` : ""}`],
+      ["Rentang", `${esc(b.first_attempt)} — ${esc(b.last_attempt)}`],
+      ["Sasaran", esc(b.targeted_users.join(", ") || "(tidak tercatat di log)")],
+      ["Layanan", esc(b.services.join(", "))],
+    ])}
+    ${b.compromised ? `<div class="req-block" style="border-color:var(--red)">
+      <strong style="color:var(--red)">LOGIN BERHASIL ${esc(b.success_at)}</strong>
+      sebagai ${esc(b.compromised_accounts.join(", ") || "(user tidak tercatat)")}.
+      Periksa apa yang dilakukan akun itu SETELAH waktu ini.</div>` : ""}
+    ${filter(b.evidence_query)}</div></div>`));
+
+  (log.privilege_use || []).forEach(p => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(p.confidence)}
+      <span class="finding-cat">sudo oleh ${esc(p.user)}</span>
+      <span class="finding-time">${esc(p.time_utc)}</span></div>
+    <div class="finding-body"><pre class="txn-pre">${esc(p.command)}</pre>
+      ${p.reasons.length ? `<div class="tl-target">${esc(p.reasons.join("; "))}</div>` : ""}
+      ${p.after_breach ? `<div class="fp-note"><span class="fp-dot"
+        style="background:var(--red)"></span>Dijalankan SETELAH login paksa berhasil.</div>` : ""}
+      ${p.by_compromised_account ? `<div class="fp-note"><span class="fp-dot"
+        style="background:var(--red)"></span>Oleh akun yang kredensialnya jebol.</div>` : ""}
+      ${filter(p.evidence_query)}</div></div>`));
+
+  (log.webshells || []).forEach(w => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(w.confidence)}
+      <span class="finding-cat">Kandidat webshell — ${esc(w.uri)}</span>
+      <span class="finding-time">${esc(w.first_seen)}</span></div>
+    <div class="finding-body">${kv([
+      ["Alasan", esc(w.reason)],
+      ["Sumber", esc(w.sources.join(", "))],
+      ["Metode", esc(w.methods.join(", "))],
+      ["Status", Object.entries(w.statuses).map(([c, n]) =>
+        `<span class="outcome-tag ${statusClass(c)}">${esc(c)} × ${n}</span>`).join(" ")],
+      ["Byte terkirim", w.bytes_total.toLocaleString()],
+    ])}
+    <div class="footnote">${w.server_answered
+      ? "Server MENJAWAB 2xx — berkasnya ada dan dieksekusi."
+      : "Server tidak pernah menjawab 2xx — kemungkinan besar hanya percobaan."}</div>
+    ${filter(w.evidence_query)}</div></div>`));
+
+  (log.encoded_parameters || []).slice(0, 20).forEach(e => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(e.confidence)}
+      <span class="finding-cat">Parameter ter-encode — ${esc(e.parameter)}=</span>
+      <span class="finding-time">baris ${e.line_number} · ${esc(e.time_utc || "")}</span></div>
+    <div class="finding-body">
+      <div class="req-block">${esc(e.src_ip)} <span class="outcome-tag ${
+        statusClass(e.status)}">${esc(e.status)}</span> ${esc(e.uri)}</div>
+      <div class="txn-label">nilai terkode</div><pre class="txn-pre">${esc(e.encoded)}</pre>
+      <div class="txn-label" style="margin-top:8px">hasil dekode</div>
+      <pre class="txn-pre resp">${esc(e.decoded)}</pre>
+      ${e.iocs.length ? `<div class="tl-target">memuat ${esc(e.iocs.join(", "))}</div>` : ""}
+      <div class="fp-note"><span class="fp-dot" style="background:var(--dim)"></span>
+        ${e.common_token_name ? "Nama parameternya lazim dipakai token sesi — bisa saja sah. " : ""}
+        Base64 di query string tidak selalu jahat, tapi ia membuat isi request
+        tidak terbaca di log — baik disengaja maupun tidak.</div>
+      ${filter(e.evidence_query)}</div></div>`));
+
+  (log.scanners || []).slice(0, 10).forEach(sc => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev("MEDIUM")}
+      <span class="finding-cat">${esc(sc.tool || "Enumerasi")} dari ${esc(sc.src_ip)}</span>
+      <span class="finding-time">${esc(sc.first_seen)}</span></div>
+    <div class="finding-body">${kv([
+      ["Request", `${sc.requests.toLocaleString()}${sc.requests_per_min
+        ? ` (${sc.requests_per_min}/menit selama ${sc.duration_sec}s)` : ""}`],
+      ["Path unik", sc.unique_paths],
+      ["404", `${sc.not_found} (${(sc.not_found_ratio * 100).toFixed(0)}%)`],
+    ])}
+    ${(sc.tools || []).map(t => `<div class="kv-row"><span class="k">${esc(t.tool)}</span>
+      <span class="v">${t.requests} request — <span class="mono">${esc(t.user_agent)}</span></span>
+      </div>`).join("")}
+    <div class="footnote">User-Agent mudah dipalsukan — ini menunjukkan perkakas
+      dengan setelan bawaan, bukan bukti mutlak.</div>
+    ${filter(sc.evidence_query)}</div></div>`));
+
+  (log.web_attacks || []).slice(0, 40).forEach(a => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(a.confidence)}
+      <span class="finding-cat">${esc(a.owasp_category)}</span>
+      <span class="finding-time">baris ${a.line_number} · ${esc(a.time_utc || "")}</span></div>
+    <div class="finding-body">
+      <div class="req-block">${esc(a.src_ip)} ${esc(a.http_method)}
+        <span class="outcome-tag ${statusClass(a.response_status)}">${
+          esc(a.response_status)}</span> ${outcome(a.outcome)}</div>
+      <pre class="txn-pre">${esc(a.request_snippet)}</pre>
+      <div class="pattern-match">pola: ${esc(a.matched_pattern)}</div>
+      ${filter(a.evidence_query)}</div></div>`));
+
+  const big = (log.large_transfers || []).filter(t => t.share_of_total >= 0.05);
+  const transfers = big.length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Response terbesar</div>
+    ${big.slice(0, 5).map(t => `<div class="kv-row">
+      <span class="k mono">${esc(t.uri)}</span>
+      <span class="v">${t.bytes.toLocaleString()} byte
+        (${(t.share_of_total * 100).toFixed(0)}% dari total) &rarr; ${esc(t.src_ip)}</span>
+      </div>`).join("")}
+    <div class="footnote">Bukan temuan sendiri — penunjuk ke mana harus melihat.
+      Data yang keluar dari aplikasi web keluar sebagai response, dan satu-satunya
+      jejaknya di log adalah kolom ukuran.</div></div>` : "";
+
+  const sources = (log.top_sources || []).length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Sumber teratas</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Sumber</th><th>Request</th>
+      <th>Error</th><th>Byte</th></tr></thead><tbody>
+    ${log.top_sources.slice(0, 12).map(row => `<tr><td class="mono">${esc(row.src_ip)}</td>
+      <td>${row.requests.toLocaleString()}</td><td>${row.errors.toLocaleString()}</td>
+      <td>${row.bytes.toLocaleString()}</td></tr>`).join("")}
+    </tbody></table></div></div>` : "";
+
+  return section("Log server", blocks.length || null,
+    `<div class="panel">${head}</div>${blocks.join("")}${transfers}${sources}`);
 }
 
 // Analisis binary: header PE, packer, runtime, kapabilitas, dan IOC.

@@ -1,12 +1,13 @@
 # Network Forensics Helper
 
 Alat bantu analisis forensik digital untuk **latihan dan pembelajaran**: pcap,
-berkas (gambar/dokumen/executable), disk image, dan RAM dump — dengan setiap
+berkas (gambar/dokumen/executable), log server, disk image, dan RAM dump — dengan setiap
 temuan disertai **filter Wireshark persis** yang menghasilkannya, supaya laporan
 bisa diverifikasi ulang dan tidak perlu mencari-cari lagi secara manual.
 
 > **English TL;DR** — A digital forensics assistant for practice and learning.
-> Analyses pcap files, disk images, memory dumps, and arbitrary files. Every
+> Analyses pcap files, server logs, disk images, memory dumps, and arbitrary
+> files. Every
 > finding carries the exact Wireshark/tshark filter that produced it, so results
 > are reproducible. Deterministic rules and statistics only — **no AI/ML**.
 > Runs natively on Windows and Linux/WSL.
@@ -211,10 +212,17 @@ python -m backend.analyze capture.pcap 10.1.21.58
 
 ### CLI — berkas apa pun
 
-Gambar, dokumen, audio, `.exe`, disk image, RAM dump:
+Gambar, dokumen, audio, `.exe`, log server, disk image, RAM dump:
 
 ```bash
 python -m backend.analyze_file bukti.jpg
+```
+
+Log dikenali dari nama BERKAS maupun dari ISINYA, jadi `/var/log/secure` yang
+tanpa ekstensi dan `access.log.3.gz` yang ter-rotasi sama-sama terbaca:
+
+```bash
+python -m backend.analyze_file /var/log/auth.log
 ```
 
 Beberapa berkas sekaligus otomatis dibandingkan lewat fuzzy hash — mendeteksi
@@ -306,6 +314,7 @@ Dokumentasi otomatis di `/docs`. Endpoint utama:
 | `smb_analyzer` | Tree connect, berkas di share, penandaan executable web |
 | `tool_fingerprint` | Identifikasi perkakas penyerang dari User-Agent |
 | `http_analyzer` | Transaksi HTTP lengkap: header, body, response |
+| `log_analyzer` | Apache/Nginx, IIS W3C, syslog/auth.log, JSON lines: serangan web, brute force + login berhasil sesudahnya, webshell, sudo pasca-kompromi, enumerasi |
 | `disk_image_analyzer` | Sleuth Kit: partisi, berkas terhapus, timeline MAC |
 | `memory_analyzer` | Volatility 3: proses, koneksi, cmdline, malfind, persistence |
 | `geoip_enrichment` | GeoLite2 lokal (opsional, butuh akun MaxMind gratis) |
@@ -355,6 +364,21 @@ memahami batasannya adalah cara tercepat menghasilkan kesimpulan yang salah.
   tidak dimasukkan ke narasi.
 - **Deteksi OWASP signature-based** — rawan false positive; verifikasi isi request
   lengkapnya sebelum menyimpulkan.
+- **Log akses hanya memuat baris request, bukan isi response.** Apakah payload
+  benar-benar dieksekusi tidak bisa dipastikan dari log web — status 200 berarti
+  server menjawab, bukan berarti serangannya berhasil. Pastikan dari log
+  aplikasi, log basis data, atau berkas di server.
+- **Log web tidak mencatat username yang dicoba** (ia ada di body POST). Brute
+  force lewat form login karena itu dilaporkan tanpa nama akun; brute force SSH
+  di `auth.log` mencatatnya.
+- **Format syslog tidak memuat tahun.** Tahun diambil dari waktu modifikasi
+  berkas dan asumsinya dicetak di laporan. Kalau berkasnya pernah disalin ulang,
+  cocokkan dulu dengan sumber lain sebelum dipakai di timeline gabungan.
+- **Keterbacaan log dilaporkan sebagai angka.** Parser yang gagal atas mayoritas
+  baris menghasilkan "0 temuan" yang terlihat persis sama dengan log bersih —
+  karena itu persentase baris terbaca selalu muncul di atas temuan.
+- **IP sumber di log adalah apa yang dicatat server.** Kalau ada proxy atau CDN
+  di depannya, yang tercatat bisa IP proxy, bukan klien sebenarnya.
 - **Strings dari berkas ter-pack tidak mencerminkan isinya.** "Tidak ditemukan
   domain apa pun" pada berkas ter-UPX adalah kesimpulan yang salah, bukan temuan
   negatif — bongkar dulu. Alat ini membongkar UPX otomatis; packer lain

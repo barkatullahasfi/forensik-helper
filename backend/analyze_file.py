@@ -16,14 +16,42 @@ from pathlib import Path
 
 from . import config as settings
 from .services import (attack_timeline, binary_analyzer, disk_image_analyzer,
-                       hash_analyzer, location_analyzer, memory_analyzer,
-                       metadata_extractor, mitre_mapper, reverse_engineer,
-                       steganography_detector, threat_feed, unpacker)
+                       hash_analyzer, location_analyzer, log_analyzer,
+                       memory_analyzer, metadata_extractor, mitre_mapper,
+                       reverse_engineer, steganography_detector, threat_feed,
+                       unpacker)
 from .services.timeline_builder import EvidenceLog
 
 DISK_IMAGE_EXT = {".e01", ".dd", ".raw", ".img", ".vmdk", ".001"}
 MEMORY_EXT = {".mem", ".vmem", ".dmp", ".raw", ".lime", ".core"}
 BINARY_EXT = {".exe", ".dll", ".sys", ".bin", ".scr", ".ocx"}
+LOG_EXT = {".log", ".w3c", ".iis", ".jsonl", ".ndjson"}
+
+
+LOG_NAMES = {"syslog", "messages", "secure", "auth", "access", "error", "audit"}
+
+
+def _is_log(path: Path, mime: str) -> bool:
+    """
+    Nama berkas dulu, lalu isinya.
+
+    Log yang dirotasi bernama `access.log.3.gz`, jadi mencocokkan suffix saja
+    meleset. Log syslog di Linux malah sering tanpa ekstensi sama sekali
+    (`/var/log/secure`) -- untuk itu isinya yang harus dibaca.
+    """
+    name = path.name.lower()
+    if any(name.endswith(ext) or f"{ext}." in name for ext in LOG_EXT):
+        return True
+    if path.stem.lower() in LOG_NAMES or name in LOG_NAMES:
+        return True
+    if not (mime.startswith("text/") or mime in ("application/octet-stream", "")):
+        return False
+    try:
+        with log_analyzer._open(path) as handle:
+            sample = [next(handle, "") for _ in range(50)]
+    except (OSError, UnicodeDecodeError):
+        return False
+    return log_analyzer.detect_format(sample) != "unknown"
 
 
 def categorize(path: Path, mime: str) -> str:
@@ -49,6 +77,10 @@ def categorize(path: Path, mime: str) -> str:
         return "disk_image"
     if ext in MEMORY_EXT:
         return "memory_dump"
+    # Diperiksa sebelum "document": log server adalah text/plain, dan
+    # memperlakukannya sebagai dokumen berarti ia cuma dipindai steganografi.
+    if _is_log(path, mime):
+        return "log"
     if mime.startswith("text/") or ext in {".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".odt"}:
         return "document"
     return "generic"
@@ -162,11 +194,17 @@ def analyze(path, progress=print) -> dict:
         specific["disk"] = disk_image_analyzer.analyze_disk_image(path, evidence)
     if category == "memory_dump":
         specific["memory"] = memory_analyzer.full_memory_triage(path, checker, evidence)
+    if category == "log":
+        specific["log"] = log_analyzer.analyze(path, evidence)
 
     memory_result = specific.get("memory") or {}
     mitre = mitre_mapper.map_from_evidence(
         evidence.records, extra=memory_result.get("lolbin_execution"))
     timeline = attack_timeline.build_from_memory(memory_result, path.name)
+    # Log punya kronologinya sendiri, dalam bentuk yang sama. RAM dump dan log
+    # tidak pernah datang dari berkas yang sama, jadi cukup dipakai yang ada isinya.
+    if not timeline.get("events") and specific.get("log", {}).get("timeline"):
+        timeline = specific["log"]["timeline"]
 
     gps = (metadata or {}).get("gps")
     locations = location_analyzer.build_location_timeline(
@@ -388,6 +426,7 @@ def print_report(result: dict) -> None:
         if unpacked.get("hint"):
             print(f"    {unpacked['hint']}")
 
+    _print_log(result.get("log") or {})
     _print_attack_timeline(result.get("attack_timeline") or {})
     _print_mitre(result.get("mitre") or [])
 
@@ -407,6 +446,122 @@ def print_report(result: dict) -> None:
 def _wrap(text: str, width: int) -> list[str]:
     import textwrap
     return textwrap.wrap(text, width) or [""]
+
+
+def _print_log(log: dict) -> None:
+    if not log.get("available"):
+        return
+    s = log["summary"]
+    print("\n" + "=" * 72)
+    print(f"  LOG SERVER — format {s['format']}")
+    print("=" * 72)
+    print(f"    {s['lines_parsed']} dari {s['lines_total']} baris terbaca "
+          f"({s['parse_rate']:.1%}), {s['unique_sources']} sumber")
+    print(f"    rentang     : {s['first_event']} s/d {s['last_event']}")
+    # Statistik web hanya untuk log yang memang memuat request. Di auth.log
+    # semuanya nol, dan nol terbaca seolah "tidak ada error" -- padahal artinya
+    # pertanyaannya tidak berlaku untuk berkas ini.
+    if s["web_entries"]:
+        print(f"    request web : {s['web_entries']}, {s['unique_paths']} path unik")
+        print(f"    status      : {s['by_status']}")
+        print(f"    error rate  : {s['error_rate']:.1%}   {s['bytes_served']} byte dilayani")
+    # Angka ini disebut lebih dulu daripada temuannya. Parser yang gagal atas
+    # mayoritas baris menghasilkan "0 temuan" yang terlihat persis sama dengan
+    # log bersih, dan pembaca harus tahu itu SEBELUM membaca kesimpulan.
+    if s["parse_rate"] < 0.5:
+        print(f"    [!] {s['lines_unparsed']} baris TIDAK terbaca — temuan di bawah "
+              "tidak meliputi seluruh berkas")
+    if s["truncated"]:
+        print(f"    [!] berkas dipotong di {s['lines_total']} baris")
+    if s["assumed_year"]:
+        print(f"    [!] syslog tanpa tahun — diasumsikan {s['assumed_year']} dari mtime berkas")
+
+    for item in log.get("brute_force", []):
+        print(f"\n    [{item['confidence']:<6}] BRUTE FORCE dari {item['src_ip']}")
+        print(f"             {item['failures']} kegagalan, {item['successes']} berhasil, "
+              f"selama {item['duration_sec']:.0f} detik"
+              + (f" ({item['attempts_per_min']}/menit)" if item["attempts_per_min"] else ""))
+        print(f"             sasaran : {', '.join(item['targeted_users'][:8]) or '?'}")
+        print(f"             layanan : {', '.join(item['services'])}")
+        print(f"             mulai   : {item['first_attempt']} s/d {item['last_attempt']}")
+        if item["compromised"]:
+            print(f"             !! LOGIN BERHASIL {item['success_at']} sebagai "
+                  f"{', '.join(item['compromised_accounts']) or '(user tidak tercatat)'}")
+            print("                Periksa apa yang dilakukan akun itu SETELAH waktu ini.")
+
+    for item in log.get("privilege_use", []):
+        print(f"\n    [{item['confidence']:<6}] SUDO oleh {item['user']} "
+              f"({item['time_utc']})")
+        print(f"             {item['command'][:150]}")
+        for reason in item["reasons"]:
+            print(f"             -> {reason}")
+        if item["after_breach"]:
+            print("             !! dijalankan SETELAH login paksa berhasil")
+        if item["by_compromised_account"]:
+            print("             !! oleh akun yang kredensialnya jebol")
+
+    for item in log.get("webshells", []):
+        print(f"\n    [{item['confidence']:<6}] WEBSHELL? {item['uri']}")
+        print(f"             {item['reason']}")
+        print(f"             {item['requests']} request dari {', '.join(item['sources'][:4])}, "
+              f"metode {', '.join(item['methods'])}, status {item['statuses']}")
+        print(f"             {item['bytes_total']} byte terkirim · {item['first_seen']} "
+              f"s/d {item['last_seen']}")
+        if not item["server_answered"]:
+            print("             Server tidak pernah menjawab 2xx — kemungkinan besar "
+                  "hanya percobaan.")
+
+    for item in log.get("encoded_parameters", [])[:20]:
+        print(f"\n    [{item['confidence']:<6}] PARAMETER TER-ENCODE baris {item['line_number']} "
+              f"dari {item['src_ip']} (status {item['status']})")
+        print(f"             {item['uri'][:110]}")
+        print(f"             {item['parameter']}= {item['encoded'][:80]}")
+        print(f"             terdekode -> {item['decoded'][:110]}")
+        if item["iocs"]:
+            print(f"             memuat   : {', '.join(item['iocs'][:6])}")
+        if item["common_token_name"]:
+            print("             nama parameternya lazim dipakai token sesi — bisa saja sah")
+
+    for item in log.get("scanners", [])[:10]:
+        label = item["tool"] or ("Enumerasi" if item["is_enumeration"] else "?")
+        print(f"\n    [MEDIUM] {label} dari {item['src_ip']} ({item['tool_category']})")
+        print(f"             {item['requests']} request, {item['unique_paths']} path unik, "
+              f"{item['not_found']} × 404 ({item['not_found_ratio']:.0%})")
+        if item["requests_per_min"]:
+            print(f"             {item['requests_per_min']} request/menit selama "
+                  f"{item['duration_sec']:.0f} detik")
+        for tool in item.get("tools", []):
+            print(f"             {tool['requests']:>5} request  {tool['tool']} "
+                  f"({tool['category']})")
+            print(f"                   UA: {tool['user_agent'][:90]}")
+
+    attacks = log.get("attack_summary") or {}
+    if attacks.get("total"):
+        print(f"\n    SERANGAN WEB: {attacks['total']} request dari "
+              f"{', '.join(attacks['attackers'][:6])}")
+        for category, count in sorted(attacks["by_category"].items(), key=lambda x: -x[1]):
+            print(f"      {count:>4} × {category}")
+        print(f"      outcome: {attacks['by_outcome']}")
+        for item in log.get("web_attacks", [])[:15]:
+            print(f"      [{item['confidence']:<6}] baris {item['line_number']:<7} "
+                  f"{item['src_ip']} {item['http_method']} -> {item['response_status']} "
+                  f"({item['outcome']})")
+            print(f"               {item['request_uri'][:110]}")
+
+    # Sepuluh response terbesar SELALU ada di log mana pun; yang layak dicetak
+    # adalah yang porsinya menonjol. Sisanya cuma mengisi layar.
+    big = [i for i in log.get("large_transfers", []) if i["share_of_total"] >= 0.05]
+    for item in big[:5]:
+        print(f"\n    [catatan] {item['bytes']} byte ({item['share_of_total']:.0%} dari total) "
+              f"ke {item['src_ip']}")
+        print(f"              {item['uri'][:110]}")
+
+    top = log.get("top_sources") or []
+    if top:
+        print("\n    SUMBER TERATAS")
+        for row in top[:10]:
+            print(f"      {row['src_ip']:<40} {row['requests']:>7} request "
+                  f"{row['errors']:>6} error  {row['bytes']:>12} byte")
 
 
 def _print_attack_timeline(timeline: dict) -> None:

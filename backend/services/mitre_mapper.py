@@ -36,6 +36,12 @@ MITRE_RULES = [
     ("memory_code_injection", "T1055", "Process Injection"),
     ("binary_packer", "T1027.002", "Obfuscated Files or Information: Software Packing"),
     ("suspicious_outbound_connection", "T1571", "Non-Standard Port"),
+    ("log_brute_force", "T1110", "Brute Force"),
+    ("log_bruteforce_success", "T1078", "Valid Accounts"),
+    ("log_enumeration", "T1595.003", "Active Scanning: Wordlist Scanning"),
+    ("log_webshell_access", "T1505.003", "Server Software Component: Web Shell"),
+    ("log_privilege_use", "T1548.003", "Abuse Elevation Control Mechanism: Sudo and Sudo Caching"),
+    ("log_encoded_parameter", "T1132.001", "Data Encoding: Standard Encoding"),
 ]
 
 # Eksekusi lewat utilitas Windows: sub-technique-nya ditentukan utilitas MANA

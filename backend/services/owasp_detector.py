@@ -10,7 +10,7 @@ cuma mendaftar payload mencurigakan tidak menjawab pertanyaan sebenarnya --
 "serangannya berhasil atau tidak?"
 """
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote_plus
 
 from .pcap_parser import run_tshark_fields
 from .timeline_builder import EvidenceLog, to_utc
@@ -147,7 +147,11 @@ def detect_owasp_patterns(pcap_path, evidence: EvidenceLog | None = None) -> lis
         evidence = EvidenceLog()
     findings = []
     for pair in extract_http_pairs(pcap_path):
-        decoded = unquote(f"{pair['uri']} {pair['body']}")
+        # unquote_plus: query string dan body form meng-encode spasi sebagai '+'.
+        # Dengan unquote biasa, "1'+OR+'1'='1" tidak cocok dengan satu pun pola
+        # SQLi -- semuanya menuntut spasi. Ditemukan saat menguji log IIS, tapi
+        # celahnya sama persis di jalur pcap ini.
+        decoded = unquote_plus(f"{pair['uri']} {pair['body']}")
         for category, (patterns, finding_type) in OWASP_RULE_MAP.items():
             matched = next((p for p in patterns if re.search(p, decoded, re.IGNORECASE)), None)
             if not matched:

