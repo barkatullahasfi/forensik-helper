@@ -17,8 +17,8 @@ from pathlib import Path
 from . import config as settings
 from .services import (attack_timeline, binary_analyzer, disk_image_analyzer,
                        hash_analyzer, location_analyzer, memory_analyzer,
-                       metadata_extractor, mitre_mapper, steganography_detector,
-                       threat_feed, unpacker)
+                       metadata_extractor, mitre_mapper, reverse_engineer,
+                       steganography_detector, threat_feed, unpacker)
 from .services.timeline_builder import EvidenceLog
 
 DISK_IMAGE_EXT = {".e01", ".dd", ".raw", ".img", ".vmdk", ".001"}
@@ -152,6 +152,9 @@ def analyze(path, progress=print) -> dict:
             path, base["file_type"], evidence=evidence)
     if category == "binary":
         specific["binary"] = binary_analyzer.analyze_binary(path, checker, evidence)
+        progress("      analisis reverse engineering statis...")
+        specific["reverse"] = reverse_engineer.analyze(
+            path, settings.STORAGE / "unpacked" / f"{path.stem}_re", evidence)
     if category in ("binary", "archive", "generic"):
         specific.update(_unpack_and_reanalyze(
             path, specific.get("binary", {}).get("pe"), checker, evidence, progress))
@@ -334,6 +337,33 @@ def print_report(result: dict) -> None:
         print(f"    runtime   : {runtime['runtime']}  (penanda: {', '.join(runtime['markers'][:3])})")
         if runtime.get("hint"):
             print(f"                {runtime['hint']}")
+
+    re_result = result.get("reverse") or {}
+    if re_result:
+        print("\n  REVERSE ENGINEERING (statis)")
+        if re_result.get("imphash"):
+            print(f"    imphash   : {re_result['imphash']}")
+        overlay = re_result.get("overlay") or {}
+        if overlay.get("has_overlay"):
+            print(f"    overlay   : {overlay['size']} byte @ offset {overlay['offset']} "
+                  f"({round(overlay['ratio'] * 100)}% berkas), entropy {overlay['entropy']}"
+                  + (f" — {overlay['detected_type']}" if overlay.get("detected_type") else ""))
+            print(f"                {overlay['note'][:120]}")
+        for item in re_result.get("resources", [])[:8]:
+            print(f"    resource  : {item['type']}/{item['name']} {item['size']} B "
+                  f"entropy {item['entropy']} — {item['note']}")
+        for item in re_result.get("base64_strings", [])[:8]:
+            print(f"    base64 @{item['offset']}: {', '.join(item['matches'][:4])}")
+        for item in re_result.get("xor_candidates", [])[:3]:
+            print(f"    XOR {item['key_hex']} ({item['match_count']} cocok): "
+                  f"{', '.join(item['matches'][:4])}")
+        entry = re_result.get("entry_point") or {}
+        if entry.get("available"):
+            print(f"    entry {entry['entry_rva']} ({entry['architecture']}):")
+            for line in entry["instructions"][:12]:
+                print(f"      {line}")
+        elif entry.get("hint"):
+            print(f"    entry     : {entry['hint']}")
 
     unpacked = result.get("unpacked") or {}
     if unpacked.get("success"):

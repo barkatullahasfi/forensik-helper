@@ -86,7 +86,8 @@ EXPORTER_REQUIRES = {"http": ("http",), "smb": ("smb", "smb2"), "tftp": ("tftp",
 
 def extract_transferred_files(pcap_path, output_dir=None, threat_checker=None,
                               evidence: EvidenceLog | None = None,
-                              protocols: dict[str, int] | None = None) -> list[dict]:
+                              protocols: dict[str, int] | None = None,
+                              progress=None) -> list[dict]:
     """
     `tshark --export-objects <proto>,<dir>` -- sama seperti Wireshark
     File > Export Objects.
@@ -98,7 +99,12 @@ def extract_transferred_files(pcap_path, output_dir=None, threat_checker=None,
     """
     if evidence is None:
         evidence = EvidenceLog()
-    base = Path(output_dir or (settings.STORAGE / "carved" / Path(pcap_path).stem))
+    # Direktori unik per proses. Dinamai dari nama pcap saja, dua analisis atas
+    # berkas yang sama (CLI dan GUI berjalan bersamaan, atau dua tab sekaligus)
+    # menulis ke direktori yang SAMA -- saling menghapus berkas, saling
+    # menghitung ganda, dan saling memperlambat lewat I/O yang beradu.
+    base = Path(output_dir or (settings.STORAGE / "carved" /
+                               f"{Path(pcap_path).stem}_{os.getpid()}"))
     results: list[dict] = []
     skipped: dict[str, int] = {}   # dilaporkan, bukan disembunyikan
     removed: dict[str, int] = {}
@@ -111,11 +117,20 @@ def extract_transferred_files(pcap_path, output_dir=None, threat_checker=None,
             continue
         proto_dir = base / proto
         proto_dir.mkdir(parents=True, exist_ok=True)
+        # `--export-objects` menulis SATU BERKAS per objek. Pada capture web,
+        # itu bisa puluhan ribu berkas dan menjadi tahap paling lama di seluruh
+        # pipeline -- pemakai perlu tahu apa yang sedang terjadi, bukan menatap
+        # satu baris statis selama semenit.
+        if progress:
+            progress(f"      carving {proto}: mengekspor objek dari pcap...")
         run([tools.resolve("tshark"), "-r", str(pcap_path),
              "--export-objects", f"{proto},{proto_dir}"],
             timeout=settings.TSHARK_TIMEOUT,
             check=False)   # protokol yang tidak ada di pcap membuat tshark
                            # keluar non-zero; itu wajar, bukan kegagalan
+        if progress:
+            written = sum(1 for _ in os.scandir(proto_dir))
+            progress(f"      carving {proto}: {written} objek ditulis, memeriksa...")
         seen_hashes: set[str] = set()
         discard: list[Path] = []
         # os.scandir memberi ukuran berkas tanpa panggilan stat() terpisah.
@@ -169,6 +184,9 @@ def extract_transferred_files(pcap_path, output_dir=None, threat_checker=None,
         # dan semuanya menetap di disk. Setelah beberapa kali analisis, direktori
         # carving berisi ratusan ribu entry -- membuat direktorinya sendiri lambat
         # dibaca dan menyulitkan menemukan berkas yang penting.
+        if progress and len(discard) > 1000:
+            progress(f"      carving {proto}: membuang {len(discard)} artefak, "
+                     f"menyimpan {len(seen_hashes)} berkas...")
         for path in discard:
             _force_unlink(path)
         removed[proto] = len(discard)

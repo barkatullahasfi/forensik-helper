@@ -593,6 +593,70 @@ def test_pcap_extensions_recognised_everywhere():
         assert not config.is_pcap(name), name
 
 
+# ---------- Reverse engineering statis ----------
+
+def test_impossible_ip_octets_rejected():
+    """
+    Pola IP juga cocok dengan deretan angka bertitik seperti '776.669.998.776',
+    yang lazim muncul dari data biner ter-XOR asal. Melaporkannya sebagai IOC
+    membuat seluruh hasil brute force XOR tidak bisa dipercaya.
+    """
+    from backend.services.reverse_engineer import _valid_hits
+    hits = [b"776.669.998.776", b"10.0.2.15", b"999.1.1.1", b"185.220.101.47",
+            b"http://evil.test/x", b"256.1.1.1"]
+    valid = _valid_hits(hits)
+    assert "10.0.2.15" in valid and "185.220.101.47" in valid
+    assert "http://evil.test/x" in valid
+    for junk in ("776.669.998.776", "999.1.1.1", "256.1.1.1"):
+        assert junk not in valid, junk
+
+
+def test_autoit_script_resource_recognised():
+    """
+    Resource bernama SCRIPT pada binary AutoIt memuat skrip terkompilasi --
+    di situlah konfigurasi C2 berada, dan strings biasa tidak menampilkannya.
+    """
+    from backend.services.reverse_engineer import KNOWN_RESOURCES
+    known, hint = KNOWN_RESOURCES["SCRIPT"]
+    assert "AutoIt" in known
+    assert "Exe2Aut" in hint or "UnAutoIt" in hint
+
+
+def test_overlay_detected_after_last_section():
+    """
+    Loader Windows mengabaikan byte setelah section terakhir, jadi apa pun di
+    sana dibaca program itu sendiri -- tempat lazim menyembunyikan muatan.
+    """
+    from unittest.mock import MagicMock, patch
+    from backend.services import reverse_engineer
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "with_overlay.exe"
+        path.write_bytes(b"\x00" * 1000 + b"PK\x03\x04" + b"X" * 500)
+        section = MagicMock(PointerToRawData=0, SizeOfRawData=1000)
+        fake = MagicMock(sections=[section])
+        with patch.dict("sys.modules", {"pefile": MagicMock(PE=lambda *a, **k: fake)}):
+            result = reverse_engineer.extract_overlay(path)
+    assert result["has_overlay"] and result["offset"] == 1000
+    assert result["size"] == 504 and result["detected_type"] == "ZIP/arsip"
+
+
+def test_base64_reported_only_when_decoded_content_matters():
+    """
+    Tanpa saringan, tiap potongan teks acak sepanjang 24 karakter ikut terbawa.
+
+    Pemisah memakai null byte seperti di berkas biner sungguhan: karakter
+    alfanumerik di sekitar blob akan ikut tertelan pola dan merusak dekodenya,
+    karena semuanya juga karakter base64 yang sah.
+    """
+    import base64 as b64
+    from backend.services.reverse_engineer import decode_base64_blobs
+    useful = b64.b64encode(b"http://c2.evil-domain.top/gate.php")
+    noise = b64.b64encode(b"just some ordinary padding text here")
+    found = decode_base64_blobs(b"\x00" + useful + b"\x00\x00" + noise + b"\x00")
+    assert len(found) == 1, [f["decoded"] for f in found]
+    assert any("c2.evil-domain.top" in m for m in found[0]["matches"])
+
+
 # ---------- Pembongkaran ----------
 
 def test_domain_filter_rejects_code_identifiers():

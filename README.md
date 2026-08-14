@@ -301,6 +301,7 @@ Dokumentasi otomatis di `/docs`. Endpoint utama:
 | `metadata_extractor` | EXIF, GPS, authorship, anomali timestamp |
 | `steganography_detector` | Signature tersisip (tervalidasi), trailing data, LSB, steghide |
 | `binary_analyzer` | Strings ASCII+UTF-16, IOC, header PE, packer, runtime, kapabilitas |
+| `reverse_engineer` | Overlay PE, resource tersembunyi, string base64/XOR, disassembly entry point, imphash |
 | `unpacker` | Bongkar UPX dan arsip/APK, lalu analisis ulang isinya |
 | `smb_analyzer` | Tree connect, berkas di share, penandaan executable web |
 | `tool_fingerprint` | Identifikasi perkakas penyerang dari User-Agent |

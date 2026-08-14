@@ -138,12 +138,17 @@ def analyze_pcap(pcap_path, target_ip: str | None = None, progress=print) -> dic
     tools_used = tool_fingerprint.analyze(pcap_path, evidence) if has("http") else []
 
     progress("[8/9] Deteksi serangan web + carving file...")
-    owasp = owasp_detector.detect_owasp_patterns(pcap_path, evidence) if has("http") else []
-    if not has("http"):
+    if has("http"):
+        progress(f"      memindai {protocols.get('http', 0)} frame HTTP "
+                 "untuk pola serangan...")
+        owasp = owasp_detector.detect_owasp_patterns(pcap_path, evidence)
+        progress(f"      {len(owasp)} pola OWASP cocok")
+    else:
+        owasp = []
         skipped.append("OWASP (tidak ada lalu lintas HTTP tidak terenkripsi)")
     carved = file_carver.extract_transferred_files(
         pcap_path, threat_checker=checker if checker.loaded else None, evidence=evidence,
-        protocols=protocols)
+        protocols=protocols, progress=progress)
 
     progress("[9/9] Menyusun timeline, MITRE mapping, dan narasi...")
     result = build_full_timeline(identity, beacons, sessions, evidence, capture_info)

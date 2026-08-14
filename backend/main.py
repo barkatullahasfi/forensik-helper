@@ -72,13 +72,20 @@ def _progress_writer(analysis_id: str):
     '[3/9] ...' untuk keperluan CLI; menyalurkannya ke berkas status membuat
     GUI bisa menampilkan kemajuan NYATA, bukan animasi yang cuma berputar.
     """
+    state = {"step": 0, "total": 9}
+
     def write(message: str) -> None:
         match = _STAGE.match(message)
         if match:
+            state["step"], state["total"] = int(match.group(1)), int(match.group(2))
             _write_status(analysis_id, "processing", stage=match.group(3),
-                          step=int(match.group(1)), total=int(match.group(2)))
+                          **state)
         else:
-            _write_status(analysis_id, "processing", stage=message)
+            # Pesan sub-langkah tidak membawa nomor tahap. Nomor terakhir
+            # dipertahankan, kalau tidak progress bar melompat mundur ke nol
+            # tiap kali ada kabar rinci -- persis saat pemakai paling butuh
+            # kepastian bahwa prosesnya masih hidup.
+            _write_status(analysis_id, "processing", stage=message.strip(), **state)
     return write
 
 
