@@ -235,7 +235,8 @@ th { font-family:var(--mono); font-size:9.5px; text-transform:uppercase;
      padding:0 10px 9px; border-bottom:1px solid var(--border); white-space:nowrap; }
 td { padding:8px 10px; font-size:11.5px; border-bottom:1px solid rgba(35,43,56,.5);
      vertical-align:top; }
-td.mono { font-family:var(--mono); font-size:11px; }
+td.mono, .mono { font-family:var(--mono); font-size:11px; }
+.muted { color:var(--dim); }
 tr:last-child td { border-bottom:none; }
 
 .copy-block { background:var(--panel-2); border:1px solid var(--border);
@@ -525,6 +526,9 @@ function render(r) {
   out.push(findings(r));
   out.push(attackTimelineSection(r));
   out.push(memorySection(r));
+  out.push(binarySection(r));
+  out.push(reverseSection(r));
+  out.push(unpackedSection(r));
   out.push(diskSection(r));
   out.push(profileAndMitre(r));
   out.push(sessionTable(r));
@@ -607,6 +611,22 @@ function alertBanner(r) {
   if (persist.length) parts.push(`<strong>${persist.length} mekanisme persistence</strong>`);
   const injected = (m.code_injection_by_process || []).filter(i => !i.known_false_positive);
   if (injected.length) parts.push(`<strong>${injected.length} proses dengan memori RWX</strong>`);
+  // Sama seperti temuan RAM: berkas ter-pack dengan muatan tersembunyi harus
+  // muncul di judul. Tanpa ini, sampel UPX berisi skrip AutoIt 219 KB tetap
+  // dilabeli "tidak ada indikator menonjol".
+  const packer = ((r.binary || {}).pe || {}).packer || {};
+  if (packer.packer) parts.push(`<strong>binary dikemas ${esc(packer.packer)}</strong>
+    — strings dan import tidak mencerminkan isi aslinya`);
+  const carriers = ((r.reverse || {}).resources || [])
+    .filter(x => x.confidence === "HIGH");
+  if ((r.reverse || {}).overlay?.has_overlay) parts.push(`<strong>overlay PE
+    ${(r.reverse.overlay.size || 0).toLocaleString()} byte</strong> di luar section`);
+  if (carriers.length) parts.push(`<strong>${carriers.length} resource pembawa muatan</strong>
+    (${esc(carriers.map(x => `${x.type}/${x.name}`).join(", "))})`);
+  const decoded = ((r.reverse || {}).base64_strings || []).length
+    + ((r.reverse || {}).xor_candidates || []).length;
+  if (decoded) parts.push(`<strong>${decoded} string tersamar</strong> yang berhasil didekode`);
+
   const deleted = (r.disk || {}).deleted_count;
   if (deleted) parts.push(`<strong>${deleted} berkas terhapus</strong> masih bisa direcover`);
   const feed = (r.threat_feed_hits || []).filter(h => !h.shared_hosting);
@@ -847,6 +867,160 @@ function memorySection(r) {
       <div class="summary-label">Informasi sistem</div>${sysRows}</div>` : "") +
     rows.join("") +
     (inject ? `<div class="panel"><div class="summary-label">malfind — region executable + writable</div>${inject}</div>` : ""));
+}
+
+// Analisis binary: header PE, packer, runtime, kapabilitas, dan IOC.
+function binarySection(r) {
+  const b = r.binary || {};
+  const pe = b.pe || {};
+  if (!pe.is_pe && !b.runtime) return "";
+
+  const packer = pe.packer || {};
+  const rows = kv([
+    ["Compile", pe.compile_timestamp],
+    ["Arsitektur", pe.machine],
+    ["Section", (pe.sections || []).length],
+    ["Import DLL", pe.imported_dll_count],
+    ["Packer", packer.packer
+      ? `<strong style="color:var(--red)">${esc(packer.packer)}</strong>
+         <span style="color:var(--dim)">[${esc(packer.confidence)}] section
+         ${esc((packer.matched_sections || []).join(", "))}</span>`
+      : (pe.is_packed_heuristic ? `terkompresi (${esc(pe.packed_reason || "")})` : null)],
+    ["Runtime", (b.runtime || {}).runtime],
+  ]);
+
+  const caps = Object.entries(pe.capabilities || {}).map(([name, hits]) =>
+    `<div class="kv-row"><span class="k">${esc(name)}</span>
+     <span class="v mono">${esc(hits.slice(0, 6).join(", "))}</span></div>`).join("");
+
+  const iocs = b.iocs || {};
+  const iocRows = ["urls", "domains", "ips", "registry_keys"].map(key => {
+    const list = (iocs[key] || []).slice(0, 12);
+    if (!list.length) return "";
+    return `<div class="txn-block"><div class="txn-label">${esc(key)}</div>
+      <pre class="txn-pre">${esc(list.join("\n"))}</pre></div>`;
+  }).join("");
+
+  // Peringatan ini menempel pada hasilnya, bukan di catatan terpisah: strings
+  // dan import dari berkas ter-pack TIDAK mencerminkan isinya, dan pembaca
+  // yang melewatkannya akan menyimpulkan "tidak ada IOC" secara keliru.
+  const warn = (packer.packer || pe.is_packed_heuristic) ? `<div class="fp-note">
+    <span class="fp-dot" style="background:var(--amber)"></span>
+    Berkas ini terkompresi. Strings, import, dan IOC di atas berasal dari stub
+    pembongkar — bukan dari program aslinya. Lihat bagian hasil bongkaran.
+    ${packer.hint ? esc(packer.hint) : ""}</div>` : "";
+
+  return section("Analisis binary", (b.runtime || {}).runtime || (packer.packer || "PE"),
+    `<div class="panel">${rows}
+      ${caps ? `<div class="summary-label" style="margin-top:12px">Kapabilitas dari import table</div>${caps}` : ""}
+      ${warn}</div>${iocRows ? `<div class="panel" style="margin-top:13px">${iocRows}</div>` : ""}`);
+}
+
+// Reverse engineering statis: tempat-tempat muatan biasa disembunyikan.
+function reverseSection(r) {
+  const re = r.reverse || {};
+  if (!Object.keys(re).length) return "";
+  const blocks = [];
+
+  const ov = re.overlay || {};
+  if (ov.has_overlay) {
+    blocks.push(`<div class="finding">
+      <div class="finding-head">${sev(ov.size > 1024 ? "HIGH" : "MEDIUM")}
+        <span class="finding-cat">Overlay PE — ${ov.size.toLocaleString()} byte</span>
+        <span class="finding-time">offset ${ov.offset} · entropy ${ov.entropy}</span></div>
+      <div class="finding-body">
+        ${ov.detected_type ? `<div class="req-block">Terdeteksi: ${esc(ov.detected_type)}</div>` : ""}
+        <div style="font-size:12.5px">${esc(ov.note)}</div>
+        <div class="txn-label" style="margin-top:8px">64 byte pertama</div>
+        <pre class="txn-pre">${esc(ov.preview_hex)}</pre></div></div>`);
+  }
+
+  (re.resources || []).forEach(res => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev(res.confidence)}
+      <span class="finding-cat">${esc(res.type)}/${esc(res.name)}</span>
+      <span class="finding-time">${res.size.toLocaleString()} B · entropy ${res.entropy}</span></div>
+    <div class="finding-body">
+      <div style="font-size:12.5px">${esc(res.note)}</div>
+      ${res.extracted_to ? `<div class="tl-target">diekstrak ke ${esc(res.extracted_to)}</div>` : ""}
+    </div></div>`));
+
+  (re.base64_strings || []).slice(0, 10).forEach(item => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev("MEDIUM")}
+      <span class="finding-cat">String base64 @ offset ${item.offset}</span></div>
+    <div class="finding-body">
+      <div class="txn-label">terkode</div><pre class="txn-pre">${esc(item.encoded)}</pre>
+      <div class="txn-label" style="margin-top:8px">hasil dekode</div>
+      <pre class="txn-pre resp">${esc(item.decoded)}</pre>
+      <div class="tl-target">${esc(item.matches.join(", "))}</div></div></div>`));
+
+  (re.xor_candidates || []).slice(0, 3).forEach(item => blocks.push(`<div class="finding">
+    <div class="finding-head">${sev("MEDIUM")}
+      <span class="finding-cat">XOR kunci ${esc(item.key_hex)}</span>
+      <span class="finding-time">${item.match_count} pola cocok</span></div>
+    <div class="finding-body"><pre class="txn-pre">${esc(item.matches.join("\n"))}</pre>
+      <div class="fp-note"><span class="fp-dot" style="background:var(--dim)"></span>
+      XOR satu byte adalah penyamaran paling umum di malware komoditas.</div></div></div>`));
+
+  const entry = re.entry_point || {};
+  const disasm = entry.available ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Titik masuk ${esc(entry.entry_rva)} (${esc(entry.architecture)})</div>
+    <pre class="txn-pre">${esc(entry.instructions.join("\n"))}</pre>
+    <div class="footnote">Instruksi pertama yang dijalankan program — sebelum apa pun
+      yang terlihat di strings.</div></div>`
+    : (entry.hint ? `<div class="footnote">${esc(entry.hint)}</div>` : "");
+
+  const meta = re.imphash ? `<div class="panel" style="margin-bottom:13px">
+    <div class="kv-row"><span class="k">imphash</span>
+      <span class="v mono">${esc(re.imphash)}</span></div>
+    <div class="footnote">Dipakai mengelompokkan sampel sekeluarga. TIDAK berlaku
+      untuk berkas ter-pack — import-nya milik stub pembongkar.</div></div>` : "";
+
+  if (!blocks.length && !disasm && !meta) return "";
+  return section("Reverse engineering (statis)", blocks.length || null,
+    meta + blocks.join("") + disasm);
+}
+
+// Hasil pembongkaran: apa yang keluar, dan IOC yang baru terlihat setelahnya.
+function unpackedSection(r) {
+  const u = r.unpacked || {};
+  if (!u.method && !u.reason) return "";
+  if (!u.success) {
+    return section("Pembongkaran", null, `<div class="panel">
+      <p style="font-size:12.5px">${esc(u.reason || u.error || "gagal")}</p>
+      ${u.hint ? `<div class="footnote">${esc(u.hint)}</div>` : ""}</div>`);
+  }
+
+  const head = u.method === "upx"
+    ? `${u.original_size.toLocaleString()} → ${u.unpacked_size.toLocaleString()} byte`
+    : `${u.file_count} berkas diekstrak`;
+
+  const iocs = r.unpacked_iocs || {};
+  const iocBlocks = ["urls", "domains", "ips"].map(key => {
+    const list = (iocs[key] || []).slice(0, 20);
+    if (!list.length) return "";
+    return `<div class="txn-block"><div class="txn-label">${esc(key)} — terlihat SETELAH dibongkar</div>
+      <pre class="txn-pre resp">${esc(list.join("\n"))}</pre></div>`;
+  }).join("");
+
+  const apk = r.apk || {};
+  const apkBlock = apk.is_apk ? `<div class="panel" style="margin-top:13px">
+    ${kv([["Package", apk.package_hint], ["Berkas dex", apk.dex_count],
+          ["Permission", (apk.permissions || []).length]])}
+    ${(apk.dangerous_permissions || []).length ? `<div class="summary-label"
+      style="margin-top:10px">Permission berbahaya</div>
+      <pre class="txn-pre">${esc(apk.dangerous_permissions.join("\n"))}</pre>` : ""}
+    <div class="footnote">${esc(apk.note || "")}</div></div>` : "";
+
+  const rejected = (u.rejected || []).length ? `<div class="panel" style="margin-top:13px">
+    <div class="summary-label">Entry arsip ditolak</div>
+    ${u.rejected.map(x => `<div class="kv-row"><span class="k">${esc(x.entry)}</span>
+      <span class="v">${esc(x.reason)}</span></div>`).join("")}</div>` : "";
+
+  return section(`Hasil bongkaran (${esc(u.method)})`, head,
+    `<div class="panel">${iocBlocks || '<p class="muted" style="font-size:12.5px">' +
+      'Tidak ada IOC baru yang muncul setelah pembongkaran.</p>'}
+     <div class="footnote">Hash berkas bukti aslinya tidak berubah — pembongkaran
+       selalu dilakukan pada salinan.</div></div>${apkBlock}${rejected}`);
 }
 
 function diskSection(r) {
